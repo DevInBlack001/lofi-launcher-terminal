@@ -5,13 +5,13 @@ Status: approved, pending implementation plan
 
 ## Purpose
 
-When the user opens any terminal emulator or TTY session, a lofi background track starts playing automatically and keeps playing until the last such session closes. The user can switch the mood (and therefore the playlist/source) at any time from the terminal, and optionally from a small TUI. Built in Rust. Must work on any terminal emulator and any TTY login, not just one specific terminal, and must run on any Linux distribution (BSD is explicitly out of scope).
+When the user opens any terminal emulator or TTY session, a lofi background track starts playing automatically and keeps playing until the last such session closes. The user can switch the mood (and therefore the playlist/source) at any time from the terminal, and optionally from a small TUI. Built in Rust. The shell-hook trigger applies uniformly across terminal emulators and TTY logins, and the tool targets Linux distributions generally.
 
-## Non-goals
+## Scope
 
-- No GUI application, no YouTube account integration, no playlist editing UI (editing is done by hand in a config file).
-- No attempt to support BSD or non-Linux platforms.
-- No bundling or redistribution of third-party media. The tool only points a player at user-supplied sources.
+- GUI playlist editing happens by hand in the config file.
+- The tool points a player at sources the user supplies; it does not bundle or redistribute media.
+- The supported platform is Linux.
 
 ## Architecture
 
@@ -24,8 +24,8 @@ Two binaries from one Cargo workspace:
 
 - Spawns `mpv --idle --no-video --input-ipc-server=$XDG_RUNTIME_DIR/lofi-mpv.sock` once per daemon lifetime.
 - Listens on `$XDG_RUNTIME_DIR/lofi-daemon.sock` for newline-delimited JSON commands: `register`, `unregister`, `mood <name>`, `next`, `pause`, `resume`, `status`, `moods`.
-- Keeps an in-memory session refcount. `register` increments it; if it was 0, playback of the current mood's sources starts. `unregister` decrements it; at 0, playback stops but the daemon and mpv process stay resident (idle) so the next `register` resumes instantly.
-- Self-spawns: the CLI checks for the daemon socket, and if absent, launches the daemon as a detached background process before sending the command. No systemd unit is required, though a user systemd unit remains an easy manual alternative for anyone who wants one.
+- Keeps an in-memory session refcount. `register` increments it; a count that was 0 starts playback of the current mood's sources. `unregister` decrements it; a count that reaches 0 stops playback while keeping the daemon and mpv process resident (idle), so the next `register` resumes instantly.
+- Self-spawns: the CLI checks for the daemon socket and launches the daemon as a detached background process when it's absent, before sending the command. A user systemd unit remains an easy manual alternative for anyone who wants one.
 - Reads `~/.config/lofi-launcher/config.toml` on startup and on `SIGHUP`/explicit `reload` command.
 
 ### CLI client (`lofi`)
@@ -33,22 +33,22 @@ Two binaries from one Cargo workspace:
 - `lofi register` / `lofi unregister`: called from shell integration hooks.
 - `lofi mood <name>`: switches the active mood and restarts playback from that mood's source list.
 - `lofi next`: skips to the next source within the current mood's list.
-- `lofi pause` / `lofi resume`: pause/resume without dropping the session count.
+- `lofi pause` / `lofi resume`: pause/resume while keeping the session count.
 - `lofi status`: prints current mood, playing/paused, current source.
 - `lofi moods`: lists configured mood names.
 - `lofi tui`: opens a ratatui screen showing current mood/track with arrow-key mood selection and pause/skip, calling the same socket commands as the CLI subcommands.
 
 ### Config file
 
-`~/.config/lofi-launcher/config.toml`. Each mood maps to a list of sources, where a source is either a local file/directory path or any URL mpv's built-in ytdl hook can resolve (YouTube, internet radio streams, etc.). The user fills in or edits sources themselves; nothing is hardcoded or scraped by this tool.
+`~/.config/lofi-launcher/config.toml`. Each mood maps to a list of sources, where a source is a local file/directory path or any URL mpv's built-in ytdl hook can resolve (YouTube, internet radio streams, etc.). The user fills in and edits sources themselves.
 
 ```toml
 default_mood = "code-and-chill"
 
 # Each mood is a list of sources.
-# A source is either a local path or a URL mpv/yt-dlp can resolve.
-# Synthwave, retrowave, and vaporwave are genre flavors, not separate moods:
-# mix them into whichever mood's list fits (e.g. vaporwave under chill-beats).
+# A source is a local path or a URL mpv/yt-dlp can resolve.
+# Synthwave, retrowave, and vaporwave are genre flavors: mix them into
+# whichever mood's list fits best (e.g. vaporwave under chill-beats).
 [moods.code-and-chill]
 sources = []
 
@@ -62,9 +62,9 @@ sources = []
 sources = []
 ```
 
-If the active mood has no sources configured, the CLI and daemon report a clear warning instead of failing silently or crashing.
+An active mood with an empty source list produces a warning from the CLI and daemon, clearly stating the mood has no sources configured.
 
-Synthwave, retrowave, and vaporwave are not separate top-level moods. They are genre flavors a user can mix into any of the four moods' source lists (for example, a vaporwave playlist fits well under `chill-beats` or `rainy-day`, a driving synthwave mix fits under `code-and-chill`). The config format already supports this since `sources` is just a list, so no schema change is needed, only documentation in the shipped config comments pointing this out.
+Synthwave, retrowave, and vaporwave are genre flavors a user can mix into any of the four moods' source lists: a vaporwave playlist fits well under `chill-beats` or `rainy-day`, a driving synthwave mix fits under `code-and-chill`. The config format already supports this since `sources` is just a list, so the shipped config comments document the convention and no schema change is needed.
 
 ### Shell integration (any terminal, any TTY)
 
@@ -75,53 +75,53 @@ lofi register
 trap 'lofi unregister' EXIT
 ```
 
-Because this runs at interactive-shell startup, it applies uniformly to every terminal emulator that launches a shell (foot, alacritty, kitty, ghostty, xterm, and so on) and to raw TTY logins, with no per-terminal-emulator configuration needed.
+This runs at interactive-shell startup, so it applies uniformly to every terminal emulator that launches a shell (foot, alacritty, kitty, ghostty, xterm, and so on) and to raw TTY logins, with a single shared snippet covering all of them.
 
 ### Dependency and portability checks
 
-- At daemon startup, check for `mpv` on `PATH` (with an environment variable override for a non-standard install location, per this user's standing preference against hardcoded paths). If missing, print "mpv not detected, install it via your distro's package manager" and exit without crashing other functionality.
-- No distro-specific assumptions beyond "Linux with XDG_RUNTIME_DIR and a POSIX shell." BSD is explicitly unsupported and not tested against.
+- At daemon startup, check for `mpv` on `PATH`, with an environment variable override available for a non-standard install location. A missing binary produces the message "mpv not detected, install it via your distro's package manager" and the daemon exits cleanly, leaving other functionality unaffected.
+- The only platform assumptions are a Linux kernel, `XDG_RUNTIME_DIR`, and a POSIX shell.
 
 ## Packaging and lifecycle scripts
 
 ### `scripts/install.sh`
 
-- Builds release binaries (`cargo build --release`) if not already built.
-- Installs `lofi` and `lofi-daemon` to `~/.local/bin` (or `$PREFIX/bin` if `PREFIX` is set, falling back gracefully, never hardcoding a system path).
-- Creates `~/.config/lofi-launcher/config.toml` from a template if one does not already exist (never overwrites an existing config).
-- Detects the user's shell (`$SHELL`) and appends the register/trap snippet to the matching rc file (`.bashrc` or `.zshrc`), guarded by a marker comment so re-running install is idempotent.
-- Checks for `mpv` and warns (does not fail) if missing.
+- Builds release binaries (`cargo build --release`) when they aren't already built.
+- Installs `lofi` and `lofi-daemon` to `~/.local/bin`, or `$PREFIX/bin` when `PREFIX` is set.
+- Creates `~/.config/lofi-launcher/config.toml` from a template when one isn't already present, preserving any existing config.
+- Detects the user's shell (`$SHELL`) and appends the register/trap snippet to the matching rc file (`.bashrc` or `.zshrc`), guarded by a marker comment so re-running install stays idempotent.
+- Checks for `mpv` and prints a warning when it's missing, continuing the rest of the install.
 
 ### `scripts/update.sh`
 
-- Pulls latest source (if run inside a git checkout) or assumes the user re-ran install over a new source tree.
+- Pulls the latest source when run inside a git checkout, or works against a freshly dropped-in source tree otherwise.
 - Rebuilds and reinstalls binaries in place.
-- Leaves the user's existing config and shell rc snippet untouched.
+- Preserves the user's existing config and shell rc snippet.
 
 ### `scripts/uninstall.sh`
 
 - Removes the installed binaries.
-- Removes the shell rc snippet (only the marker-guarded block it added).
-- Leaves the user's config file in place by default, with a prompt (or `--purge` flag) to remove it entirely.
+- Removes the marker-guarded shell rc snippet block.
+- Preserves the user's config file by default; a `--purge` flag removes it too.
 - Stops any running `lofi-daemon` process for the current user before removing files.
 
 ### `PKGBUILD`
 
-Since the tool is distro-portable but the user also wants first-class Arch support, a `PKGBUILD` is added and tracked in git at the repo root (or `packaging/PKGBUILD`), building from source via `cargo build --release`, declaring `mpv` as a runtime dependency and `rust`/`cargo` as a build dependency, and installing the two binaries plus the default config template and shell integration snippet via the package's `package()` function. This is one packaging option among others (manual install script, future distro packages); it does not replace `scripts/install.sh`, which remains the generic non-Arch path.
+A `PKGBUILD` is added and tracked in git at the repo root, for users on Arch-based distributions, building from source via `cargo build --release`, declaring `mpv` as a runtime dependency and `rust`/`cargo` as a build dependency, and installing the two binaries plus the default config template and shell integration snippet via the package's `package()` function. `scripts/install.sh` remains the general path for other distributions.
 
 ## Error handling
 
-- Daemon dying mid-session (crash, killed) is recovered transparently: the next `lofi` command detects the dead socket and respawns the daemon.
-- Missing `mpv`/`yt-dlp` binary: clear, actionable message, no silent failure, no crash of unrelated commands (e.g. `lofi status` still reports "daemon not running, mpv missing" rather than panicking).
-- Per this user's standing preference: never hardcode filesystem paths that vary by install. Config path respects `XDG_CONFIG_HOME` with a fallback to `~/.config`; binary install path respects `PREFIX` with a fallback to `~/.local/bin`.
+- A daemon that dies mid-session (crash, killed) is recovered transparently: the next `lofi` command detects the dead socket and respawns the daemon.
+- A missing `mpv`/`yt-dlp` binary produces a clear, actionable message; `lofi status` still reports "daemon not running, mpv missing" cleanly.
+- Filesystem paths that vary by install resolve through an environment variable first, with a verified fallback: config path respects `XDG_CONFIG_HOME` with a fallback to `~/.config`, and binary install path respects `PREFIX` with a fallback to `~/.local/bin`.
 
 ## Testing
 
 - Unit tests: IPC command parsing, refcount transitions (register/unregister sequences), config file parsing including the "mood with no sources" warning path.
 - Manual end-to-end test: open and close real terminal windows (at least two different emulators) and a TTY session, confirming the daemon starts on first `register`, stays alive across overlapping sessions, and stops playback only when the count reaches zero. Confirm mood switching and `lofi tui` against a real mpv instance with at least one configured source.
 
-## Out of scope for v1
+## Future work
 
 - BSD support.
-- GUI playlist editor.
+- A GUI playlist editor.
 - Automatic playlist discovery or recommendation.
