@@ -12,6 +12,7 @@ pub enum Command {
     Status,
     Moods,
     Reload,
+    Add { source: String, mood: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +26,7 @@ pub enum Response {
         current_source: Option<String>,
     },
     Moods(Vec<String>),
+    Classified(String),
 }
 
 pub fn encode_command(cmd: &Command) -> String {

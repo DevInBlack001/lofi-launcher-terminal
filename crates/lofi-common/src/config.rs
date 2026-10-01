@@ -45,6 +45,15 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<Config> {
     Ok(cfg)
 }
 
+pub fn save_config(path: &std::path::Path, config: &Config) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = toml::to_string_pretty(config)?;
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -48,6 +48,10 @@ impl<M: MpvController> DaemonState<M> {
         self.config.moods.keys().cloned().collect::<Vec<_>>().join(", ")
     }
 
+    pub fn mood_sources(&self, mood: &str) -> Vec<String> {
+        self.config.moods.get(mood).map(|m| m.sources.clone()).unwrap_or_default()
+    }
+
     pub fn handle(&mut self, cmd: Command) -> Response {
         match cmd {
             Command::Register => {
@@ -118,6 +122,36 @@ impl<M: MpvController> DaemonState<M> {
             }
             Command::Moods => Response::Moods(self.config.moods.keys().cloned().collect()),
             Command::Reload => Response::Ok,
+            Command::Add { source, mood } => {
+                let target_mood = match mood {
+                    Some(name) => {
+                        if !self.config.moods.contains_key(&name) {
+                            return Response::Error(format!(
+                                "unknown mood '{name}', valid moods: {}",
+                                self.valid_mood_names()
+                            ));
+                        }
+                        name
+                    }
+                    None => {
+                        return Response::Error(
+                            "could not classify source without metadata; pass --mood explicitly \
+                             (classification from a fetched title/description happens in the CLI \
+                             before this command is sent)".to_string(),
+                        );
+                    }
+                };
+                self.config
+                    .moods
+                    .get_mut(&target_mood)
+                    .expect("checked above")
+                    .sources
+                    .push(source);
+                if let Err(e) = lofi_common::save_config(&lofi_common::config_path(), &self.config) {
+                    return Response::Error(e.to_string());
+                }
+                Response::Classified(target_mood)
+            }
         }
     }
 }
@@ -220,5 +254,31 @@ mod tests {
             Response::Error(msg) => assert!(msg.contains("no sources configured")),
             other => panic!("expected warning error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn add_with_explicit_mood_appends_source_and_reports_classified_mood() {
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        let resp = state.handle(Command::Add {
+            source: "https://example.com/mix.mp4".to_string(),
+            mood: Some("deep-focus".to_string()),
+        });
+        match resp {
+            Response::Classified(mood) => assert_eq!(mood, "deep-focus"),
+            other => panic!("expected Classified, got {other:?}"),
+        }
+        let resp = state.handle(Command::Status);
+        let _ = resp;
+        assert!(state.mood_sources("deep-focus").contains(&"https://example.com/mix.mp4".to_string()));
+    }
+
+    #[test]
+    fn add_with_unknown_explicit_mood_returns_error() {
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        let resp = state.handle(Command::Add {
+            source: "a.mp3".to_string(),
+            mood: Some("not-a-mood".to_string()),
+        });
+        assert!(matches!(resp, Response::Error(_)));
     }
 }

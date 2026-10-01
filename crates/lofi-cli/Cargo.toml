@@ -11,6 +11,7 @@ path = "src/main.rs"
 lofi-common = { path = "../lofi-common" }
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 ratatui = "0.28"
 crossterm = "0.28"
 

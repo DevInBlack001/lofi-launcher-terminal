@@ -21,6 +21,11 @@ enum Cmd {
     Status,
     Moods,
     Tui,
+    Add {
+        source: String,
+        #[arg(long)]
+        mood: Option<String>,
+    },
 }
 
 fn runtime_socket() -> std::path::PathBuf {
@@ -44,6 +49,7 @@ fn print_response(resp: lofi_common::Response) {
                 println!("{name}");
             }
         }
+        lofi_common::Response::Classified(mood) => println!("added to mood: {mood}"),
     }
 }
 
@@ -53,6 +59,26 @@ fn main() -> anyhow::Result<()> {
 
     if matches!(cli.command, Cmd::Tui) {
         return tui::run(socket);
+    }
+
+    if let Cmd::Add { source, mood } = &cli.command {
+        client::ensure_daemon_running(&socket)?;
+        let resolved_mood = match mood {
+            Some(m) => Some(m.clone()),
+            None => client::classify_source(source)?,
+        };
+        if resolved_mood.is_none() {
+            eprintln!(
+                "could not classify '{source}' into a mood automatically; re-run with --mood <name>"
+            );
+            std::process::exit(1);
+        }
+        let resp = client::send_command(
+            &socket,
+            &DaemonCommand::Add { source: source.clone(), mood: resolved_mood },
+        )?;
+        print_response(resp);
+        return Ok(());
     }
 
     client::ensure_daemon_running(&socket)?;
@@ -67,6 +93,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Status => DaemonCommand::Status,
         Cmd::Moods => DaemonCommand::Moods,
         Cmd::Tui => unreachable!("handled above"),
+        Cmd::Add { .. } => unreachable!("handled above"),
     };
 
     let resp = client::send_command(&socket, &cmd)?;

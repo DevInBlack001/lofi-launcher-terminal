@@ -53,6 +53,33 @@ pub fn ensure_daemon_running(socket_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
+    let is_local = std::path::Path::new(source).exists();
+    if is_local {
+        return Ok(None);
+    }
+    let yt_dlp_bin = std::env::var("LOFI_YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".to_string());
+    let output = std::process::Command::new(&yt_dlp_bin)
+        .arg("--dump-json")
+        .arg("--skip-download")
+        .arg(source)
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            eprintln!("yt-dlp not detected or failed to fetch metadata for '{source}'");
+            return Ok(None);
+        }
+    };
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let title = json.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let description = json.get("description").and_then(|v| v.as_str()).unwrap_or("");
+
+    let config_path = lofi_common::config_path();
+    let config = lofi_common::load_config(&config_path)?;
+    Ok(lofi_common::classify(&config.classifier, title, description))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
