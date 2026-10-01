@@ -1,0 +1,30 @@
+default_mood = "code-and-chill"
+long_source_minutes = 20
+
+# Each mood is a list of sources.
+# A source is a local path or a URL mpv/yt-dlp can resolve.
+# Synthwave, retrowave, and vaporwave are genre flavors: mix them into
+# whichever mood's list fits best (e.g. vaporwave under chill-beats).
+[moods.code-and-chill]
+sources = []
+
+[moods.deep-focus]
+sources = []
+
+[moods.chill-beats]
+sources = []
+
+[moods.rainy-day]
+sources = []
+
+[moods.ambient]
+sources = []
+
+# Keywords used by `lofi add` to classify a new source's title into a mood.
+# The first mood whose keyword list matches (case-insensitively) wins.
+[classifier]
+code-and-chill = ["code", "study", "focus", "synthwave", "productivity"]
+deep-focus = ["deep focus", "concentration", "flow state"]
+chill-beats = ["chill", "beats", "hip hop", "lofi hip hop"]
+rainy-day = ["rain", "storm", "thunder", "cozy"]
+ambient = ["ambient", "drone", "atmosphere", "space"]
