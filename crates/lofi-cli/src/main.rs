@@ -64,7 +64,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Cmd::Add { source, mood } = &cli.command {
-        client::ensure_daemon_running(&socket)?;
         let resolved_mood = match mood {
             Some(m) => Some(m.clone()),
             None => client::classify_source(source)?,
