@@ -1,0 +1,3 @@
+# lofi-launcher-terminal: start on shell open, stop on shell close
+lofi register >/dev/null 2>&1
+trap 'lofi unregister >/dev/null 2>&1' EXIT
