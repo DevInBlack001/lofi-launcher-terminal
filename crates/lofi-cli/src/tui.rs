@@ -20,7 +20,7 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
 
     let mut selected = 0usize;
     let result = loop {
-        terminal.draw(|frame| {
+        if let Err(e) = terminal.draw(|frame| {
             let items: Vec<ListItem> = moods.iter().map(|m| ListItem::new(m.as_str())).collect();
             let mut state = ListState::default();
             state.select(Some(selected));
@@ -28,10 +28,20 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                 .block(Block::default().borders(Borders::ALL).title("lofi mood (enter: select, p: pause, r: resume, n: next, q: quit)"))
                 .highlight_symbol(">> ");
             frame.render_stateful_widget(list, frame.area(), &mut state);
-        })?;
+        }) {
+            break Err(e.into());
+        }
 
-        if event::poll(std::time::Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
+        let has_event = match event::poll(std::time::Duration::from_millis(200)) {
+            Ok(v) => v,
+            Err(e) => break Err(e.into()),
+        };
+        if has_event {
+            let event = match event::read() {
+                Ok(e) => e,
+                Err(e) => break Err(e.into()),
+            };
+            if let Event::Key(key) = event {
                 match key.code {
                     KeyCode::Up => {
                         if selected > 0 {
