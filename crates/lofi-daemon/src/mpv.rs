@@ -5,6 +5,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub trait MpvController {
+    // Convenience wrapper that RealMpv's own start_source delegates through for the
+    // simple case; nothing in the current binary calls it directly since everything
+    // goes through start_source_with_duration now.
+    #[allow(dead_code)]
     fn start_source(&mut self, source: &str) -> anyhow::Result<()>;
     fn start_source_with_duration(
         &mut self,
@@ -15,6 +19,8 @@ pub trait MpvController {
     fn stop(&mut self) -> anyhow::Result<()>;
     fn pause(&mut self) -> anyhow::Result<()>;
     fn resume(&mut self) -> anyhow::Result<()>;
+    // Part of the trait contract for future error-surfacing use; not yet read anywhere.
+    #[allow(dead_code)]
     fn last_error(&self) -> Option<String>;
     fn quit(&mut self) -> anyhow::Result<()>;
 }
@@ -28,11 +34,23 @@ fn mpv_binary() -> String {
     std::env::var("LOFI_MPV_BIN").unwrap_or_else(|_| "mpv".to_string())
 }
 
-const MPRIS_SCRIPT_CANDIDATES: [&str; 3] = [
+const MPRIS_SCRIPT_CANDIDATES: [&str; 5] = [
     "/usr/share/mpv/scripts/mpris.so",
     "/usr/lib/mpv/scripts/mpris.so",
     "/usr/local/share/mpv/scripts/mpris.so",
+    "/usr/lib/mpv-mpris/mpris.so",
+    "/etc/mpv/scripts/mpris.so",
 ];
+
+// mpv also auto-loads scripts from the user's own config directory, which can't
+// be a static candidate since it depends on $HOME/$XDG_CONFIG_HOME at runtime.
+fn user_mpv_script_dir_candidate() -> Option<PathBuf> {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .ok()?;
+    Some(base.join("mpv").join("scripts").join("mpris.so"))
+}
 
 fn find_mpris_script() -> Option<String> {
     if let Ok(path) = std::env::var("LOFI_MPV_MPRIS_SCRIPT") {
@@ -41,10 +59,16 @@ fn find_mpris_script() -> Option<String> {
         }
         eprintln!("LOFI_MPV_MPRIS_SCRIPT is set to '{path}' but that file does not exist, ignoring");
     }
-    MPRIS_SCRIPT_CANDIDATES
+    if let Some(found) = MPRIS_SCRIPT_CANDIDATES
         .iter()
         .find(|p| std::path::Path::new(p).exists())
         .map(|p| p.to_string())
+    {
+        return Some(found);
+    }
+    user_mpv_script_dir_candidate()
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
 }
 
 impl RealMpv {
@@ -228,5 +252,31 @@ mod tests {
         let result = find_mpris_script();
         std::env::remove_var("LOFI_MPV_MPRIS_SCRIPT");
         assert_ne!(result, Some("/nonexistent/mpris.so".to_string()));
+    }
+
+    #[test]
+    fn static_candidates_include_real_world_distro_paths() {
+        assert!(MPRIS_SCRIPT_CANDIDATES.contains(&"/usr/lib/mpv-mpris/mpris.so"));
+        assert!(MPRIS_SCRIPT_CANDIDATES.contains(&"/etc/mpv/scripts/mpris.so"));
+    }
+
+    #[test]
+    fn find_mpris_script_falls_back_to_user_config_dir() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let scripts_dir = dir.path().join("mpv").join("scripts");
+        std::fs::create_dir_all(&scripts_dir).unwrap();
+        let fake_script = scripts_dir.join("mpris.so");
+        std::fs::write(&fake_script, b"").unwrap();
+
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        let result = find_mpris_script();
+        std::env::remove_var("XDG_CONFIG_HOME");
+
+        // Only asserts the dynamic path is picked up when none of the static
+        // candidates exist on the machine running this test.
+        if !MPRIS_SCRIPT_CANDIDATES.iter().any(|p| std::path::Path::new(p).exists()) {
+            assert_eq!(result, Some(fake_script.to_str().unwrap().to_string()));
+        }
     }
 }
