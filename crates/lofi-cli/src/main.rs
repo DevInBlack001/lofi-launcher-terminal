@@ -57,6 +57,8 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let socket = runtime_socket();
 
+    client::ensure_daemon_running(&socket)?;
+
     if matches!(cli.command, Cmd::Tui) {
         return tui::run(socket);
     }

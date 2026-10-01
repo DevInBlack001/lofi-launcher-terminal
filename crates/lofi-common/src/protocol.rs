@@ -16,7 +16,7 @@ pub enum Command {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
+#[serde(tag = "kind", content = "data")]
 pub enum Response {
     Ok,
     Error(String),
@@ -83,5 +83,38 @@ mod tests {
     #[test]
     fn rejects_malformed_line() {
         assert!(decode_command("not json").is_err());
+    }
+
+    #[test]
+    fn round_trips_error_response() {
+        let resp = Response::Error("something went wrong".to_string());
+        let line = encode_response(&resp);
+        let decoded = decode_response(line.trim_end()).unwrap();
+        match decoded {
+            Response::Error(msg) => assert_eq!(msg, "something went wrong"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trips_moods_response() {
+        let resp = Response::Moods(vec!["code-and-chill".to_string(), "ambient".to_string()]);
+        let line = encode_response(&resp);
+        let decoded = decode_response(line.trim_end()).unwrap();
+        match decoded {
+            Response::Moods(names) => assert_eq!(names, vec!["code-and-chill".to_string(), "ambient".to_string()]),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trips_classified_response() {
+        let resp = Response::Classified("rainy-day".to_string());
+        let line = encode_response(&resp);
+        let decoded = decode_response(line.trim_end()).unwrap();
+        match decoded {
+            Response::Classified(mood) => assert_eq!(mood, "rainy-day"),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }
