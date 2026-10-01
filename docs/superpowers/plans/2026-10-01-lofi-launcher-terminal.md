@@ -23,6 +23,7 @@
 - A source is treated as a single playable unit regardless of length; a multi-hour YouTube mix is never downloaded or cut into clip files.
 - `lofi add` classifies by matching a fetched title/description against the config's `[classifier]` keyword lists; it never performs audio analysis.
 - A source whose duration exceeds `long_source_minutes` (default 20) plays from a random start offset and loops at end of file, instead of always starting at time zero.
+- `mpv-mpris` is an optional dependency, resolved via `LOFI_MPV_MPRIS_SCRIPT` falling back to a short list of real-world install paths; a missing script produces a warning only, playback continues normally.
 
 ## Review Focus
 
@@ -704,9 +705,9 @@ git commit -m "Add daemon refcount state machine with fake mpv controller"
 
 **Interfaces:**
 - Consumes: `MpvController` trait from Task 3.
-- Produces: `pub struct RealMpv { socket_path: std::path::PathBuf, child: std::process::Child }` with `pub fn spawn(socket_path: std::path::PathBuf) -> anyhow::Result<Self>` and the `MpvController` impl.
+- Produces: `pub struct RealMpv { socket_path: std::path::PathBuf, child: std::process::Child }` with `pub fn spawn(socket_path: std::path::PathBuf) -> anyhow::Result<Self>` and the `MpvController` impl. Also produces `fn find_mpris_script() -> Option<String>`, used internally by `spawn` to add an `mpv-mpris` `--script=` flag when present, with no further consumers outside this file.
 
-- [ ] **Step 1: Write a test that is skipped gracefully when mpv is not installed**
+- [ ] **Step 1: Write a test that is skipped gracefully when mpv is not installed, plus a test for MPRIS script discovery**
 
 ```rust
 #[cfg(test)]
@@ -730,6 +731,24 @@ mod tests {
         mpv.pause().unwrap();
         mpv.resume().unwrap();
         mpv.stop().unwrap();
+    }
+
+    #[test]
+    fn find_mpris_script_prefers_env_override_when_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_script = dir.path().join("mpris.so");
+        std::fs::write(&fake_script, b"").unwrap();
+        std::env::set_var("LOFI_MPV_MPRIS_SCRIPT", fake_script.to_str().unwrap());
+        assert_eq!(find_mpris_script(), Some(fake_script.to_str().unwrap().to_string()));
+        std::env::remove_var("LOFI_MPV_MPRIS_SCRIPT");
+    }
+
+    #[test]
+    fn find_mpris_script_ignores_env_override_pointing_at_missing_file() {
+        std::env::set_var("LOFI_MPV_MPRIS_SCRIPT", "/nonexistent/mpris.so");
+        let result = find_mpris_script();
+        std::env::remove_var("LOFI_MPV_MPRIS_SCRIPT");
+        assert_ne!(result, Some("/nonexistent/mpris.so".to_string()));
     }
 }
 ```
@@ -766,13 +785,39 @@ fn mpv_binary() -> String {
     std::env::var("LOFI_MPV_BIN").unwrap_or_else(|_| "mpv".to_string())
 }
 
+const MPRIS_SCRIPT_CANDIDATES: [&str; 3] = [
+    "/usr/share/mpv/scripts/mpris.so",
+    "/usr/lib/mpv/scripts/mpris.so",
+    "/usr/local/share/mpv/scripts/mpris.so",
+];
+
+fn find_mpris_script() -> Option<String> {
+    if let Ok(path) = std::env::var("LOFI_MPV_MPRIS_SCRIPT") {
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
+        }
+        eprintln!("LOFI_MPV_MPRIS_SCRIPT is set to '{path}' but that file does not exist, ignoring");
+    }
+    MPRIS_SCRIPT_CANDIDATES
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|p| p.to_string())
+}
+
 impl RealMpv {
     pub fn spawn(socket_path: PathBuf) -> anyhow::Result<Self> {
         let ipc_arg = format!("--input-ipc-server={}", socket_path.display());
-        let child = Command::new(mpv_binary())
-            .arg("--idle")
-            .arg("--no-video")
-            .arg(ipc_arg)
+        let mut command = Command::new(mpv_binary());
+        command.arg("--idle").arg("--no-video").arg(ipc_arg);
+        match find_mpris_script() {
+            Some(script) => {
+                command.arg(format!("--script={script}"));
+            }
+            None => {
+                eprintln!("mpv-mpris not detected, now-playing widgets won't see this player");
+            }
+        }
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1502,6 +1547,10 @@ if ! command -v mpv >/dev/null 2>&1; then
     echo "Warning: mpv not detected on PATH, install it via your distro's package manager for playback to work."
 fi
 
+if [ ! -e /usr/share/mpv/scripts/mpris.so ] && [ ! -e /usr/lib/mpv/scripts/mpris.so ] && [ ! -e /usr/local/share/mpv/scripts/mpris.so ] && [ -z "${LOFI_MPV_MPRIS_SCRIPT:-}" ]; then
+    echo "Note: mpv-mpris not detected, now-playing widgets (quickshell, playerctl, etc.) won't see this player. Playback still works without it."
+fi
+
 echo "Install complete. Open a new terminal to start playback automatically."
 ```
 
@@ -2094,7 +2143,7 @@ git commit -m "Add random-seek playback for long sources"
 
 **Interfaces:**
 - Consumes: the workspace `Cargo.toml`/`Cargo.lock`, `config.default.toml`, `scripts/lofi-launcher.sh.in`.
-- Produces: an Arch package installing `lofi` and `lofi-daemon` to `/usr/bin`, with `mpv` declared as a runtime dependency.
+- Produces: an Arch package installing `lofi` and `lofi-daemon` to `/usr/bin`, with `mpv` declared as a runtime dependency and `mpv-mpris` declared as an optional dependency.
 
 - [ ] **Step 1: Write `PKGBUILD`**
 
@@ -2108,6 +2157,7 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/dollamike123/lofi-launcher-terminal"
 license=('MIT')
 depends=('mpv')
+optdepends=('mpv-mpris: expose now-playing track info over MPRIS for widgets like quickshell or playerctl')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/dollamike123/lofi-launcher-terminal/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
@@ -2224,6 +2274,10 @@ lofi tui               # interactive mood picker
 ## Requirements
 
 Linux, `mpv` installed and on `PATH` (or pointed to via `LOFI_MPV_BIN`).
+
+## Now-playing widgets (quickshell, playerctl, waybar)
+
+Install `mpv-mpris` (available in most distro repos, or as an optdepend on Arch) so mpv publishes track title and play/pause state over MPRIS. Any standard MPRIS-reading widget then sees and can control the current lofi track. This is optional: playback works the same without it, only widget visibility is affected. If your `mpv-mpris` script lives somewhere nonstandard, point to it with `LOFI_MPV_MPRIS_SCRIPT=/path/to/mpris.so`.
 ```
 
 - [ ] **Step 3: Run the full workspace test suite one last time**
