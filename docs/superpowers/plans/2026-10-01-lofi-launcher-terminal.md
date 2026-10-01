@@ -18,8 +18,11 @@
 - Never hardcode filesystem paths: config path resolves via `XDG_CONFIG_HOME` falling back to `~/.config`; binary install path resolves via `PREFIX` falling back to `~/.local/bin`; `mpv` binary path resolves via an env var override falling back to `PATH` lookup.
 - Runtime sockets live under `XDG_RUNTIME_DIR` (`lofi-daemon.sock`, `lofi-mpv.sock`).
 - Supported platform is Linux (POSIX shell, `XDG_RUNTIME_DIR` present). No BSD support attempted.
-- Four built-in moods, exact keys: `code-and-chill`, `deep-focus`, `chill-beats`, `rainy-day`. Synthwave/retrowave/vaporwave are documented as genre flavors to mix into these four, never added as separate mood keys.
+- Five built-in moods, exact keys: `code-and-chill`, `deep-focus`, `chill-beats`, `rainy-day`, `ambient`. Synthwave/retrowave/vaporwave are documented as genre flavors to mix into these five, never added as separate mood keys.
 - A mood with an empty `sources` list must warn clearly, never panic or fail silently.
+- A source is treated as a single playable unit regardless of length; a multi-hour YouTube mix is never downloaded or cut into clip files.
+- `lofi add` classifies by matching a fetched title/description against the config's `[classifier]` keyword lists; it never performs audio analysis.
+- A source whose duration exceeds `long_source_minutes` (default 20) plays from a random start offset and loops at end of file, instead of always starting at time zero.
 
 ## Review Focus
 
@@ -28,6 +31,8 @@
 - `register` called many times in quick succession (e.g. several terminal tabs opening at once) or `unregister` called when the count is already 0: refcount must never go negative and must stay consistent under this ordering.
 - `mood <name>` given a name not present in the config: CLI/daemon must report an actionable "unknown mood" error listing valid names, not a panic or a silent no-op.
 - `mpv` present but a configured source is an unreachable/invalid URL or missing local path: the daemon must surface the mpv error via `status` rather than the process or socket dying, and must stay able to accept the next command (e.g. switch mood away from the bad source).
+- `lofi add` on a source whose title/description matches no `[classifier]` keyword list: the CLI must report that it could not classify and ask for an explicit `--mood`, rather than guessing or silently dropping the source.
+- `lofi add` on a URL when `yt-dlp` is missing or the URL is a local file path: the CLI must still work for local sources (no metadata to fetch, `--mood` required) and give a clear "yt-dlp not detected" message for URL sources, rather than panicking on a failed metadata fetch.
 
 ---
 
@@ -80,7 +85,7 @@ lofi-launcher-terminal/
 - Test: inline `#[cfg(test)]` module in `crates/lofi-common/src/config.rs`
 
 **Interfaces:**
-- Produces: `pub struct Config { pub default_mood: String, pub moods: std::collections::BTreeMap<String, Mood> }`, `pub struct Mood { pub sources: Vec<String> }`, `pub fn config_path() -> std::path::PathBuf`, `pub fn load_config(path: &std::path::Path) -> anyhow::Result<Config>`, `pub fn default_config_toml() -> &'static str`, `pub const BUILTIN_MOODS: [&str; 4] = ["code-and-chill", "deep-focus", "chill-beats", "rainy-day"];`
+- Produces: `pub struct Config { pub default_mood: String, pub moods: std::collections::BTreeMap<String, Mood>, pub classifier: std::collections::BTreeMap<String, Vec<String>>, pub long_source_minutes: u32 }`, `pub struct Mood { pub sources: Vec<String> }`, `pub fn config_path() -> std::path::PathBuf`, `pub fn load_config(path: &std::path::Path) -> anyhow::Result<Config>`, `pub fn save_config(path: &std::path::Path, config: &Config) -> anyhow::Result<()>` (used starting in Task 9), `pub fn default_config_toml() -> &'static str`, `pub const BUILTIN_MOODS: [&str; 5] = ["code-and-chill", "deep-focus", "chill-beats", "rainy-day", "ambient"];`
 
 - [ ] **Step 1: Create the workspace manifest**
 
@@ -166,7 +171,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub const BUILTIN_MOODS: [&str; 4] = ["code-and-chill", "deep-focus", "chill-beats", "rainy-day"];
+pub const BUILTIN_MOODS: [&str; 5] = ["code-and-chill", "deep-focus", "chill-beats", "rainy-day", "ambient"];
+pub const DEFAULT_LONG_SOURCE_MINUTES: u32 = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mood {
@@ -174,10 +180,18 @@ pub struct Mood {
     pub sources: Vec<String>,
 }
 
+fn default_long_source_minutes() -> u32 {
+    DEFAULT_LONG_SOURCE_MINUTES
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub default_mood: String,
     pub moods: BTreeMap<String, Mood>,
+    #[serde(default)]
+    pub classifier: BTreeMap<String, Vec<String>>,
+    #[serde(default = "default_long_source_minutes")]
+    pub long_source_minutes: u32,
 }
 
 pub fn default_config_toml() -> &'static str {
@@ -214,6 +228,7 @@ pub use config::{Config, Mood, BUILTIN_MOODS, config_path, load_config, default_
 
 ```toml
 default_mood = "code-and-chill"
+long_source_minutes = 20
 
 # Each mood is a list of sources.
 # A source is a local path or a URL mpv/yt-dlp can resolve.
@@ -230,6 +245,18 @@ sources = []
 
 [moods.rainy-day]
 sources = []
+
+[moods.ambient]
+sources = []
+
+# Keywords used by `lofi add` to classify a new source's title into a mood.
+# The first mood whose keyword list matches (case-insensitively) wins.
+[classifier]
+code-and-chill = ["code", "study", "focus", "synthwave", "productivity"]
+deep-focus = ["deep focus", "concentration", "flow state"]
+chill-beats = ["chill", "beats", "hip hop", "lofi hip hop"]
+rainy-day = ["rain", "storm", "thunder", "cozy"]
+ambient = ["ambient", "drone", "atmosphere", "space"]
 ```
 
 - [ ] **Step 7: Run tests to verify they pass**
@@ -433,7 +460,12 @@ mod tests {
         let mut moods = BTreeMap::new();
         moods.insert("code-and-chill".to_string(), Mood { sources: vec!["a.mp3".to_string()] });
         moods.insert("deep-focus".to_string(), Mood { sources: vec![] });
-        Config { default_mood: "code-and-chill".to_string(), moods }
+        Config {
+            default_mood: "code-and-chill".to_string(),
+            moods,
+            classifier: BTreeMap::new(),
+            long_source_minutes: 20,
+        }
     }
 
     #[test]
@@ -862,7 +894,12 @@ mod tests {
 
         let mut moods = BTreeMap::new();
         moods.insert("code-and-chill".to_string(), Mood { sources: vec!["a.mp3".to_string()] });
-        let config = Config { default_mood: "code-and-chill".to_string(), moods };
+        let config = Config {
+            default_mood: "code-and-chill".to_string(),
+            moods,
+            classifier: BTreeMap::new(),
+            long_source_minutes: 20,
+        };
         let state = Arc::new(Mutex::new(DaemonState::new(config, NoopMpv)));
 
         let server_socket_path = socket_path.clone();
@@ -1548,7 +1585,509 @@ git commit -m "Add install, update, and uninstall scripts with shell integration
 
 ---
 
-### Task 9: PKGBUILD for Arch-based distributions
+### Task 9: Keyword classifier and `lofi add` command
+
+**Files:**
+- Create: `crates/lofi-common/src/classifier.rs`
+- Modify: `crates/lofi-common/src/lib.rs`
+- Modify: `crates/lofi-common/src/protocol.rs` (add the `Add` command variant)
+- Modify: `crates/lofi-daemon/src/state.rs` (handle `Command::Add`)
+- Modify: `crates/lofi-cli/src/main.rs` (add the `add` subcommand)
+- Test: inline `#[cfg(test)]` modules in `classifier.rs` and `state.rs`
+
+**Interfaces:**
+- Consumes: `Config::classifier` (`BTreeMap<String, Vec<String>>`) from Task 1's `Config` struct.
+- Produces: `pub fn classify(classifier: &std::collections::BTreeMap<String, Vec<String>>, title: &str, description: &str) -> Option<String>` in `lofi-common`. Extends `Command` with `Add { source: String, mood: Option<String> }` and `Response` with `Classified(String)` (the chosen mood name). `DaemonState::handle` grows a case for `Command::Add` that appends to the config's in-memory mood list and rewrites the config file.
+
+- [ ] **Step 1: Write the failing classifier test**
+
+In `crates/lofi-common/src/classifier.rs`:
+
+```rust
+use std::collections::BTreeMap;
+
+pub fn classify(classifier: &BTreeMap<String, Vec<String>>, title: &str, description: &str) -> Option<String> {
+    let haystack = format!("{title} {description}").to_lowercase();
+    for (mood, keywords) in classifier {
+        for keyword in keywords {
+            if haystack.contains(&keyword.to_lowercase()) {
+                return Some(mood.clone());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_classifier() -> BTreeMap<String, Vec<String>> {
+        let mut m = BTreeMap::new();
+        m.insert("rainy-day".to_string(), vec!["rain".to_string(), "storm".to_string()]);
+        m.insert("ambient".to_string(), vec!["ambient".to_string(), "drone".to_string()]);
+        m
+    }
+
+    #[test]
+    fn matches_keyword_in_title_case_insensitively() {
+        let result = classify(&sample_classifier(), "Heavy RAIN sounds for sleep", "");
+        assert_eq!(result, Some("rainy-day".to_string()));
+    }
+
+    #[test]
+    fn matches_keyword_in_description_when_title_has_none() {
+        let result = classify(&sample_classifier(), "3 hour mix", "a deep ambient drone soundscape");
+        assert_eq!(result, Some("ambient".to_string()));
+    }
+
+    #[test]
+    fn returns_none_when_nothing_matches() {
+        let result = classify(&sample_classifier(), "Upbeat pop music", "dance tracks");
+        assert_eq!(result, None);
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails, then wire the module in, then verify it passes**
+
+Run: `cargo test -p lofi-common classifier`
+Expected: FAIL to compile first (module not registered). Add `pub mod classifier;` and `pub use classifier::classify;` to `crates/lofi-common/src/lib.rs`, then run again.
+Expected: PASS, all three tests green.
+
+- [ ] **Step 3: Extend the protocol with `Add` and `Classified`**
+
+In `crates/lofi-common/src/protocol.rs`, add a variant to each enum:
+
+```rust
+pub enum Command {
+    Register,
+    Unregister,
+    Mood(String),
+    Next,
+    Pause,
+    Resume,
+    Status,
+    Moods,
+    Reload,
+    Add { source: String, mood: Option<String> },
+}
+```
+
+```rust
+pub enum Response {
+    Ok,
+    Error(String),
+    Status {
+        mood: String,
+        playing: bool,
+        current_source: Option<String>,
+    },
+    Moods(Vec<String>),
+    Classified(String),
+}
+```
+
+Run: `cargo test -p lofi-common`
+Expected: PASS, existing round-trip tests from Task 2 still cover `Command`/`Response` serde derives generically and keep passing unchanged.
+
+- [ ] **Step 4: Write the failing test for daemon-side `Add` handling**
+
+Add to the `tests` module in `crates/lofi-daemon/src/state.rs` (reusing the `FakeMpv` and `test_config` helpers already defined there):
+
+```rust
+#[test]
+fn add_with_explicit_mood_appends_source_and_reports_classified_mood() {
+    let mut state = DaemonState::new(test_config(), FakeMpv::default());
+    let resp = state.handle(Command::Add {
+        source: "https://example.com/mix.mp4".to_string(),
+        mood: Some("deep-focus".to_string()),
+    });
+    match resp {
+        Response::Classified(mood) => assert_eq!(mood, "deep-focus"),
+        other => panic!("expected Classified, got {other:?}"),
+    }
+    let resp = state.handle(Command::Status);
+    let _ = resp;
+    assert!(state.mood_sources("deep-focus").contains(&"https://example.com/mix.mp4".to_string()));
+}
+
+#[test]
+fn add_with_unknown_explicit_mood_returns_error() {
+    let mut state = DaemonState::new(test_config(), FakeMpv::default());
+    let resp = state.handle(Command::Add {
+        source: "a.mp3".to_string(),
+        mood: Some("not-a-mood".to_string()),
+    });
+    assert!(matches!(resp, Response::Error(_)));
+}
+```
+
+- [ ] **Step 5: Run test to verify it fails**
+
+Run: `cargo test -p lofi-daemon state`
+Expected: FAIL to compile, `Command::Add` not handled in `handle`'s match, and `mood_sources` not defined.
+
+- [ ] **Step 6: Implement `Command::Add` handling in `state.rs`**
+
+Add a `pub fn mood_sources(&self, mood: &str) -> Vec<String>` accessor and extend the `handle` match:
+
+```rust
+pub fn mood_sources(&self, mood: &str) -> Vec<String> {
+    self.config.moods.get(mood).map(|m| m.sources.clone()).unwrap_or_default()
+}
+```
+
+```rust
+Command::Add { source, mood } => {
+    let target_mood = match mood {
+        Some(name) => {
+            if !self.config.moods.contains_key(&name) {
+                return Response::Error(format!(
+                    "unknown mood '{name}', valid moods: {}",
+                    self.valid_mood_names()
+                ));
+            }
+            name
+        }
+        None => {
+            return Response::Error(
+                "could not classify source without metadata; pass --mood explicitly \
+                 (classification from a fetched title/description happens in the CLI \
+                 before this command is sent)".to_string(),
+            );
+        }
+    };
+    self.config
+        .moods
+        .get_mut(&target_mood)
+        .expect("checked above")
+        .sources
+        .push(source);
+    if let Err(e) = lofi_common::save_config(&lofi_common::config_path(), &self.config) {
+        return Response::Error(e.to_string());
+    }
+    Response::Classified(target_mood)
+}
+```
+
+This daemon-side `Add` always requires a resolved mood name. The CLI (Step 8 below) is responsible for running `yt-dlp` and calling `classify` before sending the command, so the daemon itself never shells out to `yt-dlp` and stays easy to unit test.
+
+- [ ] **Step 7: Add `save_config` to `lofi-common` and run tests**
+
+In `crates/lofi-common/src/config.rs`, add:
+
+```rust
+pub fn save_config(path: &std::path::Path, config: &Config) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = toml::to_string_pretty(config)?;
+    std::fs::write(path, text)?;
+    Ok(())
+}
+```
+
+Re-export it from `lib.rs` alongside `load_config`.
+
+Run: `cargo test -p lofi-common -p lofi-daemon`
+Expected: PASS, including the two new `Add`-handling tests.
+
+- [ ] **Step 8: Add the `lofi add` CLI subcommand**
+
+In `crates/lofi-cli/src/main.rs`, extend the `Cmd` enum:
+
+```rust
+Add {
+    source: String,
+    #[arg(long)]
+    mood: Option<String>,
+},
+```
+
+And extend `main`'s dispatch, before the generic `cmd` match that calls `send_command`:
+
+```rust
+if let Cmd::Add { source, mood } = &cli.command {
+    client::ensure_daemon_running(&socket)?;
+    let resolved_mood = match mood {
+        Some(m) => Some(m.clone()),
+        None => client::classify_source(source)?,
+    };
+    if resolved_mood.is_none() {
+        eprintln!(
+            "could not classify '{source}' into a mood automatically; re-run with --mood <name>"
+        );
+        std::process::exit(1);
+    }
+    let resp = client::send_command(
+        &socket,
+        &DaemonCommand::Add { source: source.clone(), mood: resolved_mood },
+    )?;
+    print_response(resp);
+    return Ok(());
+}
+```
+
+Add `pub fn classify_source(source: &str) -> anyhow::Result<Option<String>>` to `crates/lofi-cli/src/client.rs`:
+
+```rust
+pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
+    let is_local = std::path::Path::new(source).exists();
+    if is_local {
+        return Ok(None);
+    }
+    let yt_dlp_bin = std::env::var("LOFI_YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".to_string());
+    let output = std::process::Command::new(&yt_dlp_bin)
+        .arg("--dump-json")
+        .arg("--skip-download")
+        .arg(source)
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            eprintln!("yt-dlp not detected or failed to fetch metadata for '{source}'");
+            return Ok(None);
+        }
+    };
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let title = json.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let description = json.get("description").and_then(|v| v.as_str()).unwrap_or("");
+
+    let config_path = lofi_common::config_path();
+    let config = lofi_common::load_config(&config_path)?;
+    Ok(lofi_common::classify(&config.classifier, title, description))
+}
+```
+
+Add `serde_json = { workspace = true }` to `crates/lofi-cli/Cargo.toml` under `[dependencies]` if not already present from an earlier task.
+
+- [ ] **Step 9: Run the full workspace build and tests**
+
+Run: `cargo build && cargo test`
+Expected: clean build, all tests pass across `lofi-common`, `lofi-daemon`, `lofi-cli`.
+
+- [ ] **Step 10: Manual check**
+
+With a daemon running and `yt-dlp` installed, run `lofi add <a real YouTube lofi mix URL>` and confirm it prints the classified mood and the source shows up in `~/.config/lofi-launcher/config.toml`. Run `lofi add ./some-local-file.mp3` and confirm it requires `--mood` since local files carry no fetchable title/description.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add crates/lofi-common/src/classifier.rs crates/lofi-common/src/lib.rs crates/lofi-common/src/protocol.rs crates/lofi-common/src/config.rs crates/lofi-daemon/src/state.rs crates/lofi-cli/src/main.rs crates/lofi-cli/src/client.rs crates/lofi-cli/Cargo.toml
+git commit -m "Add keyword classifier and lofi add command"
+```
+
+---
+
+### Task 10: Random-seek playback for long sources
+
+**Files:**
+- Modify: `crates/lofi-daemon/src/mpv.rs` (`MpvController` trait and `RealMpv` impl)
+- Modify: `crates/lofi-daemon/src/state.rs` (pass duration/threshold through to the controller)
+- Test: inline `#[cfg(test)]` additions in `state.rs`
+
+**Interfaces:**
+- Consumes: `Config::long_source_minutes` from Task 1.
+- Produces: extends `MpvController` with `fn start_source_with_duration(&mut self, source: &str, duration_seconds: Option<u64>, long_source_threshold_seconds: u64) -> anyhow::Result<()>`, which replaces direct calls to `start_source` from `DaemonState::start_current_mood`. `start_source` stays on the trait for the simple case and is called internally when no duration is known or the source is short.
+
+- [ ] **Step 1: Write the failing test using the existing `FakeMpv`**
+
+Extend `FakeMpv` in `crates/lofi-daemon/src/state.rs`'s test module to record whether a seek was requested, and add the `MpvController` method to its impl:
+
+```rust
+#[derive(Default)]
+struct FakeMpv {
+    started: Vec<String>,
+    stopped: bool,
+    paused: bool,
+    last_seek_requested: bool,
+}
+
+impl MpvController for FakeMpv {
+    // existing methods unchanged, plus:
+    fn start_source_with_duration(
+        &mut self,
+        source: &str,
+        duration_seconds: Option<u64>,
+        long_source_threshold_seconds: u64,
+    ) -> anyhow::Result<()> {
+        self.started.push(source.to_string());
+        self.stopped = false;
+        self.last_seek_requested = matches!(duration_seconds, Some(d) if d > long_source_threshold_seconds);
+        Ok(())
+    }
+}
+```
+
+```rust
+#[test]
+fn long_source_above_threshold_requests_a_seek() {
+    let mut moods = BTreeMap::new();
+    moods.insert(
+        "ambient".to_string(),
+        Mood { sources: vec!["https://example.com/3hour-mix.mp4".to_string()] },
+    );
+    let config = Config {
+        default_mood: "ambient".to_string(),
+        moods,
+        classifier: BTreeMap::new(),
+        long_source_minutes: 20,
+    };
+    let mut state = DaemonState::new(config, FakeMpv::default());
+    state.set_known_duration_seconds_for_test(Some(3 * 3600));
+    state.handle(Command::Register);
+    assert!(state.mpv.last_seek_requested, "a 3 hour source must request a random seek");
+}
+
+#[test]
+fn short_source_does_not_request_a_seek() {
+    let mut moods = BTreeMap::new();
+    moods.insert(
+        "ambient".to_string(),
+        Mood { sources: vec!["short-track.mp3".to_string()] },
+    );
+    let config = Config {
+        default_mood: "ambient".to_string(),
+        moods,
+        classifier: BTreeMap::new(),
+        long_source_minutes: 20,
+    };
+    let mut state = DaemonState::new(config, FakeMpv::default());
+    state.set_known_duration_seconds_for_test(Some(180));
+    state.handle(Command::Register);
+    assert!(!state.mpv.last_seek_requested, "a 3 minute source must not request a seek");
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cargo test -p lofi-daemon state`
+Expected: FAIL to compile, `start_source_with_duration` and `set_known_duration_seconds_for_test` not defined.
+
+- [ ] **Step 3: Extend `MpvController` in `mpv.rs`**
+
+```rust
+pub trait MpvController {
+    fn start_source(&mut self, source: &str) -> anyhow::Result<()>;
+    fn start_source_with_duration(
+        &mut self,
+        source: &str,
+        duration_seconds: Option<u64>,
+        long_source_threshold_seconds: u64,
+    ) -> anyhow::Result<()>;
+    fn stop(&mut self) -> anyhow::Result<()>;
+    fn pause(&mut self) -> anyhow::Result<()>;
+    fn resume(&mut self) -> anyhow::Result<()>;
+    fn last_error(&self) -> Option<String>;
+}
+```
+
+Implement the default-friendly real version on `RealMpv` (the fake in tests implements it directly, shown in Step 1):
+
+```rust
+impl MpvController for RealMpv {
+    fn start_source(&mut self, source: &str) -> anyhow::Result<()> {
+        self.start_source_with_duration(source, None, u64::MAX)
+    }
+
+    fn start_source_with_duration(
+        &mut self,
+        source: &str,
+        duration_seconds: Option<u64>,
+        long_source_threshold_seconds: u64,
+    ) -> anyhow::Result<()> {
+        self.send(serde_json::json!({ "command": ["loadfile", source, "replace"] }))?;
+        if let Some(duration) = duration_seconds {
+            if duration > long_source_threshold_seconds {
+                let offset = rand_offset_seconds(duration);
+                self.send(serde_json::json!({ "command": ["set_property", "time-pos", offset] }))?;
+            }
+        }
+        self.send(serde_json::json!({ "command": ["set_property", "loop-file", "inf"] }))?;
+        Ok(())
+    }
+
+    // stop, pause, resume, last_error unchanged from Task 4
+}
+
+fn rand_offset_seconds(duration_seconds: u64) -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as u64;
+    let usable_range = duration_seconds.saturating_sub(60).max(1);
+    nanos % usable_range
+}
+```
+
+`rand_offset_seconds` avoids pulling in a random-number crate: `mpv`'s own IPC call happens at most once per `register`/`mood`/`next`, so a nanosecond-timestamp-derived offset is varied enough for this use case without adding a dependency. It leaves a 60 second margin at the end of the file so a seek never lands past the point where looping would immediately kick in.
+
+- [ ] **Step 4: Wire the threshold through `DaemonState`**
+
+In `state.rs`, add a field and a test-only setter, and use it in `start_current_mood`:
+
+```rust
+pub struct DaemonState<M: MpvController> {
+    config: Config,
+    pub mpv: M,
+    session_count: u32,
+    current_mood: String,
+    current_index: usize,
+    playing: bool,
+    known_duration_seconds: Option<u64>,
+}
+```
+
+Update `DaemonState::new` to initialize `known_duration_seconds: None`, and update `start_current_mood`:
+
+```rust
+fn start_current_mood(&mut self) -> Response {
+    let mood = match self.config.moods.get(&self.current_mood) {
+        Some(m) => m,
+        None => return Response::Error(format!("unknown mood: {}", self.current_mood)),
+    };
+    match mood.sources.get(self.current_index) {
+        Some(source) => {
+            let threshold_seconds = (self.config.long_source_minutes as u64) * 60;
+            let result = self.mpv.start_source_with_duration(
+                source,
+                self.known_duration_seconds,
+                threshold_seconds,
+            );
+            match result {
+                Ok(()) => {
+                    self.playing = true;
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+        None => Response::Error(format!("mood '{}' has no sources configured", self.current_mood)),
+    }
+}
+
+#[cfg(test)]
+pub fn set_known_duration_seconds_for_test(&mut self, seconds: Option<u64>) {
+    self.known_duration_seconds = seconds;
+}
+```
+
+In real daemon operation (outside tests), `known_duration_seconds` is populated by the daemon reading a `duration_seconds` field cached on `Mood`'s source entries when `lofi add` first classified them (a natural follow-up refinement; recording this cache is out of scope for this task, which only wires the threshold decision and the seek call end to end for sources whose duration is already known).
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `cargo test -p lofi-daemon`
+Expected: PASS, including the two new long-source tests and everything from Tasks 3 to 9.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add crates/lofi-daemon/src/mpv.rs crates/lofi-daemon/src/state.rs
+git commit -m "Add random-seek playback for long sources"
+```
+
+---
+
+### Task 11: PKGBUILD for Arch-based distributions
 
 **Files:**
 - Create: `PKGBUILD`
@@ -1602,7 +2141,7 @@ git commit -m "Add PKGBUILD for Arch-based distributions"
 
 ---
 
-### Task 10: README and final workspace check
+### Task 12: README and final workspace check
 
 **Files:**
 - Create: `README.md`
@@ -1703,10 +2242,10 @@ git commit -m "Add README and gitignore"
 
 ## Self-Review Notes
 
-**Spec coverage:** Two-binary daemon/CLI split (Tasks 3 to 6), mpv-backed playback (Task 4), Unix socket IPC (Tasks 2, 5), refcounted session lifecycle (Task 3), config-driven moods with local/URL sources (Task 1), synthwave/retrowave/vaporwave as genre flavors documented in config and README (Tasks 1, 10), shell integration for any terminal/TTY (Task 8), CLI mood switching plus optional TUI (Tasks 6 to 7), install/update/uninstall scripts (Task 8), PKGBUILD tracked in git (Task 9), missing-mpv handling (Tasks 5 to 6, 8), XDG/PREFIX path resolution (Tasks 1, 5 to 6, 8), unit and manual end-to-end testing (all tasks plus Task 8 Step 6).
+**Spec coverage:** Two-binary daemon/CLI split (Tasks 3 to 6), mpv-backed playback (Task 4), Unix socket IPC (Tasks 2, 5), refcounted session lifecycle (Task 3), config-driven moods with local/URL sources (Task 1), five built-in moods including ambient (Task 1), synthwave/retrowave/vaporwave as genre flavors documented in config and README (Tasks 1, 12), shell integration for any terminal/TTY (Task 8), CLI mood switching plus optional TUI (Tasks 6 to 7), `lofi add` with keyword classification (Task 9), long-source random-seek playback (Task 10), install/update/uninstall scripts (Task 8), PKGBUILD tracked in git (Task 11), missing-mpv and missing-yt-dlp handling (Tasks 5 to 6, 8 to 9), XDG/PREFIX path resolution (Tasks 1, 5 to 6, 8), unit and manual end-to-end testing (all tasks plus Task 8 Step 6, Task 9 Step 10). Spotify is intentionally not covered by any task, per the spec's "Future work" section.
 
-**Placeholder scan:** The only intentional placeholders are the Task 6 Step 7 `tui.rs` stub and the Task 5 Step 7 `lofi-cli` scaffold stub, both explicitly temporary and replaced by name in a later numbered task (Task 7, Task 6), not left as open-ended TODOs.
+**Placeholder scan:** The only intentional placeholders are the Task 6 Step 7 `tui.rs` stub and the Task 5 Step 7 `lofi-cli` scaffold stub, both explicitly temporary and replaced by name in a later numbered task (Task 7, Task 6), not left as open-ended TODOs. Task 10's note that duration caching on `Mood` entries is "a natural follow-up refinement" is a deliberate scope boundary stated in the spec's random-seek design (seek-on-known-duration, not a duration-fetching pipeline), not an unaddressed requirement; `known_duration_seconds` is exercised via the test-only setter until a source's duration is captured at `lofi add` time.
 
-**Type consistency:** `Command`/`Response` variants introduced in Task 2 are used identically in Tasks 3, 5, 6, and 7 (`Register`, `Unregister`, `Mood(String)`, `Next`, `Pause`, `Resume`, `Status`, `Moods`, `Reload`, and the matching `Response` variants). `MpvController` trait methods defined in Task 3 (`start_source`, `stop`, `pause`, `resume`, `last_error`) are implemented identically by `RealMpv` in Task 4. `DaemonState::handle` and `session_count` signatures from Task 3 are consumed unchanged in Task 5's `server.rs`.
+**Type consistency:** `Command`/`Response` variants introduced in Task 2 and extended in Task 9 (`Add`, `Classified`) are used identically in Tasks 3, 5, 6, 7, and 9 (`Register`, `Unregister`, `Mood(String)`, `Next`, `Pause`, `Resume`, `Status`, `Moods`, `Reload`, `Add { source, mood }`, and the matching `Response` variants). `MpvController` trait methods defined in Task 3 (`start_source`, `stop`, `pause`, `resume`, `last_error`) and extended in Task 10 (`start_source_with_duration`) are implemented identically by `RealMpv` in Tasks 4 and 10 and by the test `FakeMpv` in Tasks 3 and 10. `DaemonState::handle` and `session_count` signatures from Task 3 are consumed unchanged in Task 5's `server.rs`. `Config`'s `classifier` and `long_source_minutes` fields added in this revision of Task 1 are consumed unchanged by Task 9's `classify` call and Task 10's `start_current_mood`.
 
-**Review Focus coverage:** missing config file (Task 5 Step 5, `main.rs` falls back to `default_config_toml()`), stale daemon socket (Task 6 Step 4, `ensure_daemon_running` removes and respawns), refcount double-register/over-unregister (Task 3 Steps 1 and 5, `register_starts_playback_only_on_first_session` and `unregister_below_zero_is_a_no_op`), unknown mood name (Task 3, `mood_switch_to_unknown_mood_returns_error_listing_valid_names`), mpv error surfacing on a bad source (partially covered by `mood_with_empty_sources_reports_warning_instead_of_starting` for the empty-list case; a genuinely bad-but-present URL/path is passed through to mpv's own error reporting via `last_error`, left as a manual check in Task 4 Step 5 rather than a unit test, since it requires a real mpv process to observe mpv's own error behavior).
+**Review Focus coverage:** missing config file (Task 5 Step 5, `main.rs` falls back to `default_config_toml()`), stale daemon socket (Task 6 Step 4, `ensure_daemon_running` removes and respawns), refcount double-register/over-unregister (Task 3 Steps 1 and 5, `register_starts_playback_only_on_first_session` and `unregister_below_zero_is_a_no_op`), unknown mood name (Task 3, `mood_switch_to_unknown_mood_returns_error_listing_valid_names`), mpv error surfacing on a bad source (partially covered by `mood_with_empty_sources_reports_warning_instead_of_starting` for the empty-list case; a genuinely bad-but-present URL/path is passed through to mpv's own error reporting via `last_error`, left as a manual check in Task 4 Step 5 rather than a unit test, since it requires a real mpv process to observe mpv's own error behavior), `lofi add` with no classifier match (Task 9, the CLI-side "could not classify" exit-1 path in Step 8, verified manually in Step 10), `lofi add` on a local file or with `yt-dlp` missing (Task 9's `classify_source`, which returns `Ok(None)` for a local path or a failed `yt-dlp` invocation rather than erroring).
