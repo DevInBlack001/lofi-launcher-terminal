@@ -17,6 +17,19 @@ pub fn send_command(socket_path: &Path, cmd: &lofi_common::Command) -> anyhow::R
     lofi_common::decode_response(response_line.trim_end())
 }
 
+fn daemon_binary() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("LOFI_DAEMON_BIN") {
+        return std::path::PathBuf::from(path);
+    }
+    match std::env::current_exe() {
+        Ok(exe) => match exe.parent() {
+            Some(dir) => dir.join("lofi-daemon"),
+            None => std::path::PathBuf::from("lofi-daemon"),
+        },
+        Err(_) => std::path::PathBuf::from("lofi-daemon"),
+    }
+}
+
 pub fn ensure_daemon_running(socket_path: &Path) -> anyhow::Result<()> {
     if socket_path.exists() && UnixStream::connect(socket_path).is_ok() {
         return Ok(());
@@ -24,7 +37,7 @@ pub fn ensure_daemon_running(socket_path: &Path) -> anyhow::Result<()> {
     if socket_path.exists() {
         std::fs::remove_file(socket_path)?;
     }
-    std::process::Command::new("lofi-daemon")
+    std::process::Command::new(daemon_binary())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -69,5 +82,13 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let resp = send_command(&socket_path, &lofi_common::Command::Register).unwrap();
         assert!(matches!(resp, lofi_common::Response::Ok));
+    }
+
+    #[test]
+    fn daemon_binary_respects_env_override() {
+        std::env::set_var("LOFI_DAEMON_BIN", "/tmp/some-custom-lofi-daemon");
+        let resolved = daemon_binary();
+        std::env::remove_var("LOFI_DAEMON_BIN");
+        assert_eq!(resolved, std::path::PathBuf::from("/tmp/some-custom-lofi-daemon"));
     }
 }
