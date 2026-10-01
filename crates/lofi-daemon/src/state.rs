@@ -25,6 +25,8 @@ impl<M: MpvController> DaemonState<M> {
         }
     }
 
+    // Accessor used by this project's own test suite, not by main.rs's runtime dispatch.
+    #[allow(dead_code)]
     pub fn session_count(&self) -> u32 {
         self.session_count
     }
@@ -63,6 +65,8 @@ impl<M: MpvController> DaemonState<M> {
         self.config.moods.keys().cloned().collect::<Vec<_>>().join(", ")
     }
 
+    // Accessor used by this project's own test suite, not by main.rs's runtime dispatch.
+    #[allow(dead_code)]
     pub fn mood_sources(&self, mood: &str) -> Vec<String> {
         self.config.moods.get(mood).map(|m| m.sources.clone()).unwrap_or_default()
     }
