@@ -78,11 +78,19 @@ impl RealMpv {
     }
 
     fn send(&self, payload: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        self.send_with_timeout(payload, Duration::from_secs(2))
+    }
+
+    fn send_with_timeout(
+        &self,
+        payload: serde_json::Value,
+        read_timeout: Duration,
+    ) -> anyhow::Result<serde_json::Value> {
         let mut stream = UnixStream::connect(&self.socket_path)?;
         let mut line = serde_json::to_string(&payload)?;
         line.push('\n');
         stream.write_all(line.as_bytes())?;
-        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_read_timeout(Some(read_timeout))?;
         let mut reader = BufReader::new(stream);
         let mut response = String::new();
         reader.read_line(&mut response)?;
@@ -91,9 +99,15 @@ impl RealMpv {
 
     // mpv needs a moment to resolve a loaded file's real duration (network sources
     // in particular), so poll a few times rather than trusting the first reply.
+    // This runs while DaemonState's mutex is held, so each attempt uses a short
+    // timeout instead of the normal 2s: a stalled source should cap the whole
+    // poll at a few seconds, not block every other daemon command for ~42s.
     fn query_duration(&self) -> Option<u64> {
         for _ in 0..20 {
-            if let Ok(resp) = self.send(serde_json::json!({ "command": ["get_property", "duration"] })) {
+            if let Ok(resp) = self.send_with_timeout(
+                serde_json::json!({ "command": ["get_property", "duration"] }),
+                Duration::from_millis(250),
+            ) {
                 if let Some(data) = resp.get("data") {
                     if let Some(secs) = data.as_f64() {
                         if secs > 0.0 {
