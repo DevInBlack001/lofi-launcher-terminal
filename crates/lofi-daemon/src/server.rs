@@ -62,6 +62,12 @@ mod tests {
     struct NoopMpv;
     impl MpvController for NoopMpv {
         fn start_source(&mut self, _source: &str) -> anyhow::Result<()> { Ok(()) }
+        fn start_source_with_duration(
+            &mut self,
+            _source: &str,
+            _duration_seconds: Option<u64>,
+            _long_source_threshold_seconds: u64,
+        ) -> anyhow::Result<()> { Ok(()) }
         fn stop(&mut self) -> anyhow::Result<()> { Ok(()) }
         fn pause(&mut self) -> anyhow::Result<()> { Ok(()) }
         fn resume(&mut self) -> anyhow::Result<()> { Ok(()) }

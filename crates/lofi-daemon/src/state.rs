@@ -8,6 +8,7 @@ pub struct DaemonState<M: MpvController> {
     current_mood: String,
     current_index: usize,
     playing: bool,
+    known_duration_seconds: Option<u64>,
 }
 
 impl<M: MpvController> DaemonState<M> {
@@ -20,6 +21,7 @@ impl<M: MpvController> DaemonState<M> {
             current_mood,
             current_index: 0,
             playing: false,
+            known_duration_seconds: None,
         }
     }
 
@@ -33,15 +35,28 @@ impl<M: MpvController> DaemonState<M> {
             None => return Response::Error(format!("unknown mood: {}", self.current_mood)),
         };
         match mood.sources.get(self.current_index) {
-            Some(source) => match self.mpv.start_source(source) {
-                Ok(()) => {
-                    self.playing = true;
-                    Response::Ok
+            Some(source) => {
+                let threshold_seconds = (self.config.long_source_minutes as u64) * 60;
+                let result = self.mpv.start_source_with_duration(
+                    source,
+                    self.known_duration_seconds,
+                    threshold_seconds,
+                );
+                match result {
+                    Ok(()) => {
+                        self.playing = true;
+                        Response::Ok
+                    }
+                    Err(e) => Response::Error(e.to_string()),
                 }
-                Err(e) => Response::Error(e.to_string()),
-            },
+            }
             None => Response::Error(format!("mood '{}' has no sources configured", self.current_mood)),
         }
+    }
+
+    #[cfg(test)]
+    pub fn set_known_duration_seconds_for_test(&mut self, seconds: Option<u64>) {
+        self.known_duration_seconds = seconds;
     }
 
     fn valid_mood_names(&self) -> String {
@@ -169,12 +184,25 @@ mod tests {
         started: Vec<String>,
         stopped: bool,
         paused: bool,
+        last_seek_requested: bool,
     }
 
     impl MpvController for FakeMpv {
         fn start_source(&mut self, source: &str) -> anyhow::Result<()> {
             self.started.push(source.to_string());
             self.stopped = false;
+            Ok(())
+        }
+        fn start_source_with_duration(
+            &mut self,
+            source: &str,
+            duration_seconds: Option<u64>,
+            long_source_threshold_seconds: u64,
+        ) -> anyhow::Result<()> {
+            self.started.push(source.to_string());
+            self.stopped = false;
+            self.last_seek_requested =
+                matches!(duration_seconds, Some(d) if d > long_source_threshold_seconds);
             Ok(())
         }
         fn stop(&mut self) -> anyhow::Result<()> {
@@ -281,6 +309,44 @@ mod tests {
         let written = std::fs::read_to_string(scratch_dir.path().join("lofi-launcher").join("config.toml")).unwrap();
         std::env::remove_var("XDG_CONFIG_HOME");
         assert!(written.contains("https://example.com/mix.mp4"), "config file did not contain the new source: {written}");
+    }
+
+    #[test]
+    fn long_source_above_threshold_requests_a_seek() {
+        let mut moods = BTreeMap::new();
+        moods.insert(
+            "ambient".to_string(),
+            Mood { sources: vec!["https://example.com/3hour-mix.mp4".to_string()] },
+        );
+        let config = Config {
+            default_mood: "ambient".to_string(),
+            moods,
+            classifier: BTreeMap::new(),
+            long_source_minutes: 20,
+        };
+        let mut state = DaemonState::new(config, FakeMpv::default());
+        state.set_known_duration_seconds_for_test(Some(3 * 3600));
+        state.handle(Command::Register);
+        assert!(state.mpv.last_seek_requested, "a 3 hour source must request a random seek");
+    }
+
+    #[test]
+    fn short_source_does_not_request_a_seek() {
+        let mut moods = BTreeMap::new();
+        moods.insert(
+            "ambient".to_string(),
+            Mood { sources: vec!["short-track.mp3".to_string()] },
+        );
+        let config = Config {
+            default_mood: "ambient".to_string(),
+            moods,
+            classifier: BTreeMap::new(),
+            long_source_minutes: 20,
+        };
+        let mut state = DaemonState::new(config, FakeMpv::default());
+        state.set_known_duration_seconds_for_test(Some(180));
+        state.handle(Command::Register);
+        assert!(!state.mpv.last_seek_requested, "a 3 minute source must not request a seek");
     }
 
     #[test]

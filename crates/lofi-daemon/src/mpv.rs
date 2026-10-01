@@ -6,6 +6,12 @@ use std::time::{Duration, Instant};
 
 pub trait MpvController {
     fn start_source(&mut self, source: &str) -> anyhow::Result<()>;
+    fn start_source_with_duration(
+        &mut self,
+        source: &str,
+        duration_seconds: Option<u64>,
+        long_source_threshold_seconds: u64,
+    ) -> anyhow::Result<()>;
     fn stop(&mut self) -> anyhow::Result<()>;
     fn pause(&mut self) -> anyhow::Result<()>;
     fn resume(&mut self) -> anyhow::Result<()>;
@@ -85,7 +91,23 @@ impl RealMpv {
 
 impl MpvController for RealMpv {
     fn start_source(&mut self, source: &str) -> anyhow::Result<()> {
+        self.start_source_with_duration(source, None, u64::MAX)
+    }
+
+    fn start_source_with_duration(
+        &mut self,
+        source: &str,
+        duration_seconds: Option<u64>,
+        long_source_threshold_seconds: u64,
+    ) -> anyhow::Result<()> {
         self.send(serde_json::json!({ "command": ["loadfile", source, "replace"] }))?;
+        if let Some(duration) = duration_seconds {
+            if duration > long_source_threshold_seconds {
+                let offset = rand_offset_seconds(duration);
+                self.send(serde_json::json!({ "command": ["set_property", "time-pos", offset] }))?;
+            }
+        }
+        self.send(serde_json::json!({ "command": ["set_property", "loop-file", "inf"] }))?;
         Ok(())
     }
 
@@ -107,6 +129,13 @@ impl MpvController for RealMpv {
     fn last_error(&self) -> Option<String> {
         None
     }
+}
+
+fn rand_offset_seconds(duration_seconds: u64) -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as u64;
+    let usable_range = duration_seconds.saturating_sub(60).max(1);
+    nanos % usable_range
 }
 
 impl Drop for RealMpv {
