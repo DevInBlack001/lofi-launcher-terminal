@@ -2148,18 +2148,18 @@ git commit -m "Add random-seek playback for long sources"
 - [ ] **Step 1: Write `PKGBUILD`**
 
 ```bash
-# Maintainer: dollamike123 <dollamike123@gmail.com>
+# Maintainer: DevInBlack001 <53265844+DevInBlack001@users.noreply.github.com>
 pkgname=lofi-launcher-terminal
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Play mood-based lofi music in the background whenever a terminal or TTY session is open"
 arch=('x86_64' 'aarch64')
-url="https://github.com/dollamike123/lofi-launcher-terminal"
+url="https://github.com/DevInBlack001/lofi-launcher-terminal"
 license=('MIT')
 depends=('mpv')
 optdepends=('mpv-mpris: expose now-playing track info over MPRIS for widgets like quickshell or playerctl')
 makedepends=('cargo')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/dollamike123/lofi-launcher-terminal/archive/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/DevInBlack001/lofi-launcher-terminal/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {
