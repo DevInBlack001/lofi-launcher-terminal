@@ -22,6 +22,12 @@ done
 # process (e.g. someone's editor with that string open in a buffer).
 pkill -u "$(id -u)" -x lofi-daemon 2>/dev/null || true
 
+# Safety net for an already-running OLD daemon build without the SIGTERM
+# handler: a bare SIGTERM skips Drop, so mpv is never asked to quit and is
+# orphaned. Target it by its unique IPC socket path so this can't touch an
+# unrelated mpv instance.
+pkill -u "$(id -u)" -f -- "--input-ipc-server=.*lofi-mpv\.sock" 2>/dev/null || true
+
 rm -f "$BIN_DIR/lofi" "$BIN_DIR/lofi-daemon"
 echo "Removed binaries from $BIN_DIR"
 

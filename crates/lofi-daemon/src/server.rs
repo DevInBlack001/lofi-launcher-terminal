@@ -72,6 +72,7 @@ mod tests {
         fn pause(&mut self) -> anyhow::Result<()> { Ok(()) }
         fn resume(&mut self) -> anyhow::Result<()> { Ok(()) }
         fn last_error(&self) -> Option<String> { None }
+        fn quit(&mut self) -> anyhow::Result<()> { Ok(()) }
     }
 
     #[test]

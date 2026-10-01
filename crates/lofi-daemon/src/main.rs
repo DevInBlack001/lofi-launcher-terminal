@@ -2,7 +2,7 @@ mod mpv;
 mod server;
 mod state;
 
-use mpv::RealMpv;
+use mpv::{MpvController, RealMpv};
 use state::DaemonState;
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +34,17 @@ fn main() -> anyhow::Result<()> {
 
     let mpv = RealMpv::spawn(mpv_socket)?;
     let state = Arc::new(Mutex::new(DaemonState::new(config, mpv)));
+
+    // A raw SIGTERM/SIGINT skips Drop, so without this handler mpv is
+    // orphaned (reparented to init) and keeps playing after the daemon dies.
+    let shutdown_state = state.clone();
+    ctrlc::set_handler(move || {
+        if let Ok(mut guard) = shutdown_state.lock() {
+            let _ = guard.mpv.quit();
+        }
+        std::process::exit(0);
+    })
+    .expect("failed to install signal handler");
 
     server::serve(&daemon_socket, state)
 }

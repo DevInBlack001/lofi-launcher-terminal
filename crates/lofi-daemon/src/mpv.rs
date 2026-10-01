@@ -16,6 +16,7 @@ pub trait MpvController {
     fn pause(&mut self) -> anyhow::Result<()>;
     fn resume(&mut self) -> anyhow::Result<()>;
     fn last_error(&self) -> Option<String>;
+    fn quit(&mut self) -> anyhow::Result<()>;
 }
 
 pub struct RealMpv {
@@ -87,6 +88,24 @@ impl RealMpv {
         reader.read_line(&mut response)?;
         Ok(serde_json::from_str(&response)?)
     }
+
+    // mpv needs a moment to resolve a loaded file's real duration (network sources
+    // in particular), so poll a few times rather than trusting the first reply.
+    fn query_duration(&self) -> Option<u64> {
+        for _ in 0..20 {
+            if let Ok(resp) = self.send(serde_json::json!({ "command": ["get_property", "duration"] })) {
+                if let Some(data) = resp.get("data") {
+                    if let Some(secs) = data.as_f64() {
+                        if secs > 0.0 {
+                            return Some(secs as u64);
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        None
+    }
 }
 
 impl MpvController for RealMpv {
@@ -101,7 +120,10 @@ impl MpvController for RealMpv {
         long_source_threshold_seconds: u64,
     ) -> anyhow::Result<()> {
         self.send(serde_json::json!({ "command": ["loadfile", source, "replace"] }))?;
-        if let Some(duration) = duration_seconds {
+        // In real usage the daemon never knows the duration up front, so when the
+        // caller didn't supply one, ask mpv itself after the file has loaded.
+        let effective_duration = duration_seconds.or_else(|| self.query_duration());
+        if let Some(duration) = effective_duration {
             if duration > long_source_threshold_seconds {
                 let offset = rand_offset_seconds(duration);
                 self.send(serde_json::json!({ "command": ["set_property", "time-pos", offset] }))?;
@@ -128,6 +150,11 @@ impl MpvController for RealMpv {
 
     fn last_error(&self) -> Option<String> {
         None
+    }
+
+    fn quit(&mut self) -> anyhow::Result<()> {
+        self.send(serde_json::json!({ "command": ["quit"] }))?;
+        Ok(())
     }
 }
 

@@ -222,6 +222,9 @@ mod tests {
         fn last_error(&self) -> Option<String> {
             None
         }
+        fn quit(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     fn test_config() -> Config {
