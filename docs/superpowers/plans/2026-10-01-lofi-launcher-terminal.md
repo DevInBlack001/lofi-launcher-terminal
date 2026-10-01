@@ -86,7 +86,7 @@ lofi-launcher-terminal/
 - Test: inline `#[cfg(test)]` module in `crates/lofi-common/src/config.rs`
 
 **Interfaces:**
-- Produces: `pub struct Config { pub default_mood: String, pub moods: std::collections::BTreeMap<String, Mood>, pub classifier: std::collections::BTreeMap<String, Vec<String>>, pub long_source_minutes: u32 }`, `pub struct Mood { pub sources: Vec<String> }`, `pub fn config_path() -> std::path::PathBuf`, `pub fn load_config(path: &std::path::Path) -> anyhow::Result<Config>`, `pub fn save_config(path: &std::path::Path, config: &Config) -> anyhow::Result<()>` (used starting in Task 9), `pub fn default_config_toml() -> &'static str`, `pub const BUILTIN_MOODS: [&str; 5] = ["code-and-chill", "deep-focus", "chill-beats", "rainy-day", "ambient"];`
+- Produces: `pub struct Config { pub default_mood: String, pub moods: std::collections::BTreeMap<String, Mood>, pub classifier: std::collections::BTreeMap<String, Vec<String>>, pub long_source_minutes: u32 }`, `pub struct Mood { pub sources: Vec<String> }`, `pub fn config_path() -> std::path::PathBuf`, `pub fn load_config(path: &std::path::Path) -> anyhow::Result<Config>`, `pub fn default_config_toml() -> &'static str`, `pub const BUILTIN_MOODS: [&str; 5] = ["code-and-chill", "deep-focus", "chill-beats", "rainy-day", "ambient"];`. (`save_config` is a Task 9 interface, implemented there alongside its own test; it does not belong to this task.)
 
 - [ ] **Step 1: Create the workspace manifest**
 
