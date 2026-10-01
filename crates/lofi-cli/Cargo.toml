@@ -11,6 +11,8 @@ path = "src/main.rs"
 lofi-common = { path = "../lofi-common" }
 clap = { workspace = true }
 anyhow = { workspace = true }
+ratatui = "0.28"
+crossterm = "0.28"
 
 [dev-dependencies]
 tempfile = "3"
