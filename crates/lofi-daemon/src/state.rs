@@ -258,6 +258,9 @@ mod tests {
 
     #[test]
     fn add_with_explicit_mood_appends_source_and_reports_classified_mood() {
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+
         let mut state = DaemonState::new(test_config(), FakeMpv::default());
         let resp = state.handle(Command::Add {
             source: "https://example.com/mix.mp4".to_string(),
@@ -265,20 +268,30 @@ mod tests {
         });
         match resp {
             Response::Classified(mood) => assert_eq!(mood, "deep-focus"),
-            other => panic!("expected Classified, got {other:?}"),
+            other => {
+                std::env::remove_var("XDG_CONFIG_HOME");
+                panic!("expected Classified, got {other:?}")
+            }
         }
-        let resp = state.handle(Command::Status);
-        let _ = resp;
         assert!(state.mood_sources("deep-focus").contains(&"https://example.com/mix.mp4".to_string()));
+
+        let written = std::fs::read_to_string(scratch_dir.path().join("lofi-launcher").join("config.toml")).unwrap();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(written.contains("https://example.com/mix.mp4"), "config file did not contain the new source: {written}");
     }
 
     #[test]
     fn add_with_unknown_explicit_mood_returns_error() {
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+
         let mut state = DaemonState::new(test_config(), FakeMpv::default());
         let resp = state.handle(Command::Add {
             source: "a.mp3".to_string(),
             mood: Some("not-a-mood".to_string()),
         });
+
+        std::env::remove_var("XDG_CONFIG_HOME");
         assert!(matches!(resp, Response::Error(_)));
     }
 }

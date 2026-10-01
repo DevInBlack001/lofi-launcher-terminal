@@ -118,4 +118,12 @@ mod tests {
         std::env::remove_var("LOFI_DAEMON_BIN");
         assert_eq!(resolved, std::path::PathBuf::from("/tmp/some-custom-lofi-daemon"));
     }
+
+    #[test]
+    fn classify_source_degrades_gracefully_when_yt_dlp_is_missing() {
+        std::env::set_var("LOFI_YTDLP_BIN", "/nonexistent/definitely-not-yt-dlp");
+        let result = classify_source("https://example.com/some-video");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert_eq!(result.unwrap(), None);
+    }
 }
