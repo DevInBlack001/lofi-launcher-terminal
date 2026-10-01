@@ -22,7 +22,8 @@ Two binaries from one Cargo workspace:
 
 ### Daemon
 
-- Spawns `mpv --idle --no-video --input-ipc-server=$XDG_RUNTIME_DIR/lofi-mpv.sock` once per daemon lifetime.
+- Spawns `mpv --idle --no-video --input-ipc-server=$XDG_RUNTIME_DIR/lofi-mpv.sock` once per daemon lifetime, with an added `--script=<path to mpv-mpris>` flag when the `mpv-mpris` script is found, so mpv publishes title and play/pause state over MPRIS. This lets any standard MPRIS-reading widget (quickshell's music module, playerctl, waybar modules) show and control the current lofi track with no daemon-side D-Bus code: mpv-mpris does that work once it's loaded.
+- The `mpv-mpris` script path resolves the same way as other dependencies: an environment variable override first (`LOFI_MPV_MPRIS_SCRIPT`), then the common real-world install locations (`/usr/share/mpv/scripts/mpris.so`, `/usr/lib/mpv/scripts/mpris.so`, and the Nix/Home Manager-style per-user scripts directory), and a plain "mpv-mpris not detected, now-playing widgets won't see this player" warning (not an error) when none match, since MPRIS visibility is a nice-to-have, not required for playback.
 - Listens on `$XDG_RUNTIME_DIR/lofi-daemon.sock` for newline-delimited JSON commands: `register`, `unregister`, `mood <name>`, `next`, `pause`, `resume`, `status`, `moods`, `add <source>`.
 - A long source (longer than a configured threshold, default 20 minutes) plays from a random start offset each time it's selected, looping back to the start of the file when playback reaches the end, so a multi-hour mix feels like varied clips without downloading or re-encoding anything.
 - Keeps an in-memory session refcount. `register` increments it; a count that was 0 starts playback of the current mood's sources. `unregister` decrements it; a count that reaches 0 stops playback while keeping the daemon and mpv process resident (idle), so the next `register` resumes instantly.
@@ -108,6 +109,7 @@ This runs at interactive-shell startup, so it applies uniformly to every termina
 
 - At daemon startup, check for `mpv` on `PATH`, with an environment variable override available for a non-standard install location. A missing binary produces the message "mpv not detected, install it via your distro's package manager" and the daemon exits cleanly, leaving other functionality unaffected.
 - `lofi add` on a URL requires `yt-dlp` on `PATH` (also overridable via an environment variable). A missing `yt-dlp` produces a clear message and `lofi add` falls back to requiring `--mood` to classify a URL, or works normally for local file sources, which don't need `yt-dlp` at all.
+- A missing `mpv-mpris` script produces a warning, not an error: playback continues normally through mpv, only now-playing widget visibility is affected.
 - The only platform assumptions are a Linux kernel, `XDG_RUNTIME_DIR`, and a POSIX shell.
 
 ## Packaging and lifecycle scripts
@@ -118,7 +120,7 @@ This runs at interactive-shell startup, so it applies uniformly to every termina
 - Installs `lofi` and `lofi-daemon` to `~/.local/bin`, or `$PREFIX/bin` when `PREFIX` is set.
 - Creates `~/.config/lofi-launcher/config.toml` from a template when one isn't already present, preserving any existing config.
 - Detects the user's shell (`$SHELL`) and appends the register/trap snippet to the matching rc file (`.bashrc` or `.zshrc`), guarded by a marker comment so re-running install stays idempotent.
-- Checks for `mpv` and prints a warning when it's missing, continuing the rest of the install.
+- Checks for `mpv` and prints a warning when it's missing, continuing the rest of the install. Also checks for an `mpv-mpris` script in the standard locations and prints a separate, clearly optional warning when it's missing, since it only affects now-playing widget visibility.
 
 ### `scripts/update.sh`
 
@@ -135,7 +137,7 @@ This runs at interactive-shell startup, so it applies uniformly to every termina
 
 ### `PKGBUILD`
 
-A `PKGBUILD` is added and tracked in git at the repo root, for users on Arch-based distributions, building from source via `cargo build --release`, declaring `mpv` as a runtime dependency and `rust`/`cargo` as a build dependency, and installing the two binaries plus the default config template and shell integration snippet via the package's `package()` function. `scripts/install.sh` remains the general path for other distributions.
+A `PKGBUILD` is added and tracked in git at the repo root, for users on Arch-based distributions, building from source via `cargo build --release`, declaring `mpv` as a runtime dependency, `mpv-mpris` as an optional dependency, and `rust`/`cargo` as a build dependency, and installing the two binaries plus the default config template and shell integration snippet via the package's `package()` function. `scripts/install.sh` remains the general path for other distributions.
 
 ## Error handling
 
