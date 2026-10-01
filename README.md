@@ -3,6 +3,12 @@
 Plays mood-based lofi music in the background for as long as any terminal
 or TTY session is open on the machine.
 
+![Adding sources with lofi add](docs/screenshots/cli-add.png)
+
+![Interactive mood picker](docs/screenshots/tui.png)
+
+![lofi help](docs/screenshots/cli-help.png)
+
 ## How it works
 
 Opening a terminal or logging into a TTY runs `lofi register`, which starts
