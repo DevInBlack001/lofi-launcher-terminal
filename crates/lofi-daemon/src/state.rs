@@ -162,6 +162,8 @@ mod tests {
     use lofi_common::Mood;
     use std::collections::BTreeMap;
 
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[derive(Default)]
     struct FakeMpv {
         started: Vec<String>,
@@ -258,6 +260,7 @@ mod tests {
 
     #[test]
     fn add_with_explicit_mood_appends_source_and_reports_classified_mood() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
@@ -282,6 +285,7 @@ mod tests {
 
     #[test]
     fn add_with_unknown_explicit_mood_returns_error() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
