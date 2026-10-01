@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
+# Same path resolution as install.sh/update.sh: environment-relative, never
+# hardcoded, so this removes exactly what install.sh put in place.
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lofi-launcher"
@@ -14,11 +16,18 @@ for arg in "$@"; do
     fi
 done
 
-pkill -u "$(id -u)" -f 'lofi-daemon' 2>/dev/null || true
+# Stop any running daemon for this user before removing its binary.
+# -x matches the exact process name only, not any command line containing
+# the substring "lofi-daemon", so this can't accidentally kill an unrelated
+# process (e.g. someone's editor with that string open in a buffer).
+pkill -u "$(id -u)" -x lofi-daemon 2>/dev/null || true
 
 rm -f "$BIN_DIR/lofi" "$BIN_DIR/lofi-daemon"
 echo "Removed binaries from $BIN_DIR"
 
+# Check both rc files regardless of the current $SHELL: the user may have
+# switched shells since installing, and the marker guard makes this safe
+# even if only one of them actually has the block.
 for RC_FILE in "$HOME/.bashrc" "$HOME/.zshrc"; do
     if [ -f "$RC_FILE" ] && grep -qF "$MARKER_START" "$RC_FILE"; then
         sed -i "/$MARKER_START/,/$MARKER_END/d" "$RC_FILE"
@@ -26,6 +35,8 @@ for RC_FILE in "$HOME/.bashrc" "$HOME/.zshrc"; do
     fi
 done
 
+# Config is kept by default since it holds the user's own moods/sources;
+# only --purge removes it, an explicit, opt-in destructive action.
 if [ "$PURGE" = "1" ]; then
     rm -rf "$CONFIG_DIR"
     echo "Removed config directory $CONFIG_DIR"

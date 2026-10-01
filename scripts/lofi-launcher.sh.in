@@ -1,3 +1,5 @@
-# lofi-launcher-terminal: start on shell open, stop on shell close
+# lofi-launcher-terminal: start on shell open, stop on shell close.
+# Output is silenced since this runs on every interactive shell startup
+# and shouldn't clutter a fresh terminal prompt.
 lofi register >/dev/null 2>&1
 trap 'lofi unregister >/dev/null 2>&1' EXIT

@@ -1,4 +1,8 @@
 # Maintainer: DevInBlack001 <53265844+DevInBlack001@users.noreply.github.com>
+#
+# This is one install path among several (see scripts/install.sh for the
+# general, non-Arch-specific route); the project targets Linux broadly,
+# not Arch exclusively.
 pkgname=lofi-launcher-terminal
 pkgver=0.1.0
 pkgrel=1
