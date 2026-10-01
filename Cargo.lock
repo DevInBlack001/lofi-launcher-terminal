@@ -109,6 +109,7 @@ dependencies = [
  "anyhow",
  "lofi-common",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

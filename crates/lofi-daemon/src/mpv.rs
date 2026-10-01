@@ -1,7 +1,158 @@
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
 pub trait MpvController {
     fn start_source(&mut self, source: &str) -> anyhow::Result<()>;
     fn stop(&mut self) -> anyhow::Result<()>;
     fn pause(&mut self) -> anyhow::Result<()>;
     fn resume(&mut self) -> anyhow::Result<()>;
     fn last_error(&self) -> Option<String>;
+}
+
+pub struct RealMpv {
+    socket_path: PathBuf,
+    child: Child,
+}
+
+fn mpv_binary() -> String {
+    std::env::var("LOFI_MPV_BIN").unwrap_or_else(|_| "mpv".to_string())
+}
+
+const MPRIS_SCRIPT_CANDIDATES: [&str; 3] = [
+    "/usr/share/mpv/scripts/mpris.so",
+    "/usr/lib/mpv/scripts/mpris.so",
+    "/usr/local/share/mpv/scripts/mpris.so",
+];
+
+fn find_mpris_script() -> Option<String> {
+    if let Ok(path) = std::env::var("LOFI_MPV_MPRIS_SCRIPT") {
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
+        }
+        eprintln!("LOFI_MPV_MPRIS_SCRIPT is set to '{path}' but that file does not exist, ignoring");
+    }
+    MPRIS_SCRIPT_CANDIDATES
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|p| p.to_string())
+}
+
+impl RealMpv {
+    pub fn spawn(socket_path: PathBuf) -> anyhow::Result<Self> {
+        let ipc_arg = format!("--input-ipc-server={}", socket_path.display());
+        let mut command = Command::new(mpv_binary());
+        command.arg("--idle").arg("--no-video").arg(ipc_arg);
+        match find_mpris_script() {
+            Some(script) => {
+                command.arg(format!("--script={script}"));
+            }
+            None => {
+                eprintln!("mpv-mpris not detected, now-playing widgets won't see this player");
+            }
+        }
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !socket_path.exists() {
+            if Instant::now() > deadline {
+                anyhow::bail!("mpv did not create its IPC socket within 3 seconds");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        Ok(Self { socket_path, child })
+    }
+
+    fn send(&self, payload: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let mut stream = UnixStream::connect(&self.socket_path)?;
+        let mut line = serde_json::to_string(&payload)?;
+        line.push('\n');
+        stream.write_all(line.as_bytes())?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        reader.read_line(&mut response)?;
+        Ok(serde_json::from_str(&response)?)
+    }
+}
+
+impl MpvController for RealMpv {
+    fn start_source(&mut self, source: &str) -> anyhow::Result<()> {
+        self.send(serde_json::json!({ "command": ["loadfile", source, "replace"] }))?;
+        Ok(())
+    }
+
+    fn stop(&mut self) -> anyhow::Result<()> {
+        self.send(serde_json::json!({ "command": ["stop"] }))?;
+        Ok(())
+    }
+
+    fn pause(&mut self) -> anyhow::Result<()> {
+        self.send(serde_json::json!({ "command": ["set_property", "pause", true] }))?;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> anyhow::Result<()> {
+        self.send(serde_json::json!({ "command": ["set_property", "pause", false] }))?;
+        Ok(())
+    }
+
+    fn last_error(&self) -> Option<String> {
+        None
+    }
+}
+
+impl Drop for RealMpv {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mpv_available() -> bool {
+        std::process::Command::new("mpv").arg("--version").output().is_ok()
+    }
+
+    #[test]
+    fn spawns_and_accepts_ipc_commands() {
+        if !mpv_available() {
+            eprintln!("skipping: mpv not installed in this environment");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("mpv-test.sock");
+        let mut mpv = RealMpv::spawn(socket_path).unwrap();
+        // pausing an idle mpv instance must not error, proving the IPC link works
+        mpv.pause().unwrap();
+        mpv.resume().unwrap();
+        mpv.stop().unwrap();
+    }
+
+    #[test]
+    fn find_mpris_script_prefers_env_override_when_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_script = dir.path().join("mpris.so");
+        std::fs::write(&fake_script, b"").unwrap();
+        std::env::set_var("LOFI_MPV_MPRIS_SCRIPT", fake_script.to_str().unwrap());
+        assert_eq!(find_mpris_script(), Some(fake_script.to_str().unwrap().to_string()));
+        std::env::remove_var("LOFI_MPV_MPRIS_SCRIPT");
+    }
+
+    #[test]
+    fn find_mpris_script_ignores_env_override_pointing_at_missing_file() {
+        std::env::set_var("LOFI_MPV_MPRIS_SCRIPT", "/nonexistent/mpris.so");
+        let result = find_mpris_script();
+        std::env::remove_var("LOFI_MPV_MPRIS_SCRIPT");
+        assert_ne!(result, Some("/nonexistent/mpris.so".to_string()));
+    }
 }

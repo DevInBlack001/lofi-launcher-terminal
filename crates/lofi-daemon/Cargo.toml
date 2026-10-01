@@ -7,3 +7,6 @@ edition = "2021"
 lofi-common = { path = "../lofi-common" }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
