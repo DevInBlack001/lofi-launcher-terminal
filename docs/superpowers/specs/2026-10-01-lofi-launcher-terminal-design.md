@@ -153,3 +153,4 @@ A `PKGBUILD` is added and tracked in git at the repo root, for users on Arch-bas
 - BSD support.
 - A GUI playlist editor.
 - Automatic playlist discovery or recommendation.
+- Spotify sources, as a second playback backend alongside mpv: this needs a Spotify Premium account, a Spotify Developer app for OAuth, and a Spotify Connect client such as `spotifyd` running as a controllable playback device, since Spotify audio can't be extracted the way mpv/yt-dlp handle YouTube and local files. Scoped out of this version due to that added complexity.
