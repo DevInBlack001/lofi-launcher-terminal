@@ -105,9 +105,9 @@ impl MpvController for RealMpv {
             if duration > long_source_threshold_seconds {
                 let offset = rand_offset_seconds(duration);
                 self.send(serde_json::json!({ "command": ["set_property", "time-pos", offset] }))?;
+                self.send(serde_json::json!({ "command": ["set_property", "loop-file", "inf"] }))?;
             }
         }
-        self.send(serde_json::json!({ "command": ["set_property", "loop-file", "inf"] }))?;
         Ok(())
     }
 
@@ -148,6 +148,8 @@ impl Drop for RealMpv {
 mod tests {
     use super::*;
 
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn mpv_available() -> bool {
         std::process::Command::new("mpv").arg("--version").output().is_ok()
     }
@@ -169,6 +171,7 @@ mod tests {
 
     #[test]
     fn find_mpris_script_prefers_env_override_when_file_exists() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let fake_script = dir.path().join("mpris.so");
         std::fs::write(&fake_script, b"").unwrap();
@@ -179,6 +182,7 @@ mod tests {
 
     #[test]
     fn find_mpris_script_ignores_env_override_pointing_at_missing_file() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         std::env::set_var("LOFI_MPV_MPRIS_SCRIPT", "/nonexistent/mpris.so");
         let result = find_mpris_script();
         std::env::remove_var("LOFI_MPV_MPRIS_SCRIPT");

@@ -185,6 +185,7 @@ mod tests {
         stopped: bool,
         paused: bool,
         last_seek_requested: bool,
+        loop_file_requested: bool,
     }
 
     impl MpvController for FakeMpv {
@@ -203,6 +204,7 @@ mod tests {
             self.stopped = false;
             self.last_seek_requested =
                 matches!(duration_seconds, Some(d) if d > long_source_threshold_seconds);
+            self.loop_file_requested = self.last_seek_requested;
             Ok(())
         }
         fn stop(&mut self) -> anyhow::Result<()> {
@@ -347,6 +349,7 @@ mod tests {
         state.set_known_duration_seconds_for_test(Some(180));
         state.handle(Command::Register);
         assert!(!state.mpv.last_seek_requested, "a 3 minute source must not request a seek");
+        assert!(!state.mpv.loop_file_requested, "a 3 minute source must not request loop-file");
     }
 
     #[test]
