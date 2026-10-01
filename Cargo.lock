@@ -110,6 +110,7 @@ dependencies = [
  "lofi-common",
  "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
