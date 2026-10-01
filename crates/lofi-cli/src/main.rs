@@ -5,6 +5,7 @@ use lofi_common::Command as DaemonCommand;
 
 #[derive(Parser)]
 #[command(name = "lofi")]
+#[command(about = "Play mood-based lofi music in the background, controlled from the terminal")]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -12,15 +13,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Called by shell integration when a terminal/TTY opens; starts playback on the first session
     Register,
+    /// Called by shell integration when a terminal/TTY closes; stops playback when the last session ends
     Unregister,
+    /// Switch the active mood (and its source list)
     Mood { name: String },
+    /// Skip to the next source in the current mood
     Next,
+    /// Pause playback without ending the session
     Pause,
+    /// Resume playback without ending the session
     Resume,
+    /// Show the current mood, playing/paused state, and current source
     Status,
+    /// List the configured mood names
     Moods,
+    /// Open an interactive mood picker
     Tui,
+    /// Classify a source into a mood (or use an explicit mood) and add it to the config
     Add {
         source: String,
         #[arg(long)]
