@@ -453,7 +453,17 @@ fn perform(
         }
         Action::Play { mood, index, seek_seconds } => lofi_common::Command::PlaySource { mood, index, seek_seconds },
         Action::SwitchMood(mood) => lofi_common::Command::Mood(mood),
-        Action::RemoveSource { mood, source } => lofi_common::Command::RemoveSource { mood, source },
+        Action::RemoveSource { mood, source } => {
+            return match client::send_command(socket, &lofi_common::Command::RemoveSource { mood: mood.clone(), source }) {
+                Ok(lofi_common::Response::Ok) => {
+                    // The browser's in-memory list is now stale (one entry
+                    // short); re-fetch it so the view matches the config
+                    // the daemon just wrote, same as a fresh ListSources.
+                    perform(Action::ListSources(mood), socket, browser, chapter_results, metadata_results)
+                }
+                other => action_error(other),
+            };
+        }
     };
     action_error(client::send_command(socket, &command))
 }
@@ -647,6 +657,59 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_source_refreshes_the_browsers_source_list() {
+        // Real bug this guards against: perform() sent RemoveSource to the
+        // daemon but never re-fetched the mood's sources afterward, so the
+        // TUI kept showing the just-removed entry until the user backed out
+        // and re-entered the mood.
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("fake-daemon.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        std::thread::spawn(move || {
+            // First request: RemoveSource, respond Ok.
+            let (stream, _) = listener.accept().unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("RemoveSource"), "expected RemoveSource, got: {line}");
+            writer
+                .write_all(lofi_common::encode_response(&lofi_common::Response::Ok).as_bytes())
+                .unwrap();
+
+            // Second request: the follow-up Sources re-fetch, respond with
+            // the shorter list (the URL entry already removed).
+            let (stream, _) = listener.accept().unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("Sources"), "expected Sources, got: {line}");
+            let resp = lofi_common::Response::Sources(vec![LOCAL.to_string()]);
+            writer.write_all(lofi_common::encode_response(&resp).as_bytes()).unwrap();
+        });
+
+        let mut browser = browser_in_ambient();
+        let (chapter_tx, _chapter_rx) = mpsc::channel();
+        let (metadata_tx, _metadata_rx) = mpsc::channel();
+        let action = Action::RemoveSource { mood: "ambient".to_string(), source: URL.to_string() };
+        let error = perform(action, &socket_path, &mut browser, &chapter_tx, &metadata_tx);
+
+        assert_eq!(error, None);
+        match &browser.level {
+            Level::Sources { sources, .. } => {
+                assert_eq!(sources, &vec![LOCAL.to_string()], "stale source list was not refreshed");
+            }
+            Level::Moods => panic!("expected Sources level, got Moods"),
+            Level::Chapters { .. } => panic!("expected Sources level, got Chapters"),
+        }
+    }
 
     #[test]
     fn action_error_surfaces_daemon_errors_and_transport_failures() {
