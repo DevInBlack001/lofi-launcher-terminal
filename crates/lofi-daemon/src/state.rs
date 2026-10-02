@@ -334,6 +334,46 @@ impl<M: MpvController> DaemonState<M> {
                 self.replace_config(fresh);
                 Response::Classified(target_mood)
             }
+            Command::RemoveSource { mood, source } => {
+                let path = lofi_common::config_path();
+                let fresh = match lofi_common::load_config_or_default(&path) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        return Response::Error(format!(
+                            "could not read {} (left untouched): {e}",
+                            path.display()
+                        ))
+                    }
+                };
+                if !fresh.moods.contains_key(&mood) {
+                    let valid = fresh.moods.keys().cloned().collect::<Vec<_>>().join(", ");
+                    return Response::Error(format!("unknown mood '{mood}', valid moods: {valid}"));
+                }
+                if let Err(e) = lofi_common::remove_source_from_mood(&path, &mood, &source) {
+                    return Response::Error(e.to_string());
+                }
+                let mut fresh = match lofi_common::load_config_or_default(&path) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        return Response::Error(format!(
+                            "could not read {} after removing: {e}",
+                            path.display()
+                        ))
+                    }
+                };
+                // If the removed source is currently playing, keep playback running until
+                // the next natural advance or explicit command. Just clamp the index if needed.
+                if self.current_mood == mood {
+                    let mood_len = fresh.moods.get(&mood).map(|m| m.sources.len()).unwrap_or(0);
+                    if self.current_index >= mood_len {
+                        self.current_index = mood_len.saturating_sub(1);
+                    }
+                }
+                fresh.loop_playback = self.config.loop_playback;
+                fresh.audio_quality = self.config.audio_quality.clone();
+                self.replace_config(fresh);
+                Response::Ok
+            }
         }
     }
 }
@@ -1027,5 +1067,82 @@ mod tests {
 
         std::env::remove_var("XDG_CONFIG_HOME");
         assert!(matches!(resp, Response::Error(_)));
+    }
+
+    #[test]
+    fn remove_source_from_mood_removes_existing_source_and_updates_config() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+        let mut config = test_config();
+        config.moods.get_mut("deep-focus").unwrap().sources = vec!["a.mp3".to_string(), "b.mp3".to_string(), "c.mp3".to_string()];
+        write_config_to(scratch_dir.path(), &config);
+
+        let mut state = DaemonState::new(config, FakeMpv::default());
+        let resp = state.handle(Command::RemoveSource {
+            mood: "deep-focus".to_string(),
+            source: "b.mp3".to_string(),
+        });
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(matches!(resp, Response::Ok), "unexpected {resp:?}");
+        assert_eq!(state.mood_sources("deep-focus"), vec!["a.mp3".to_string(), "c.mp3".to_string()]);
+    }
+
+    #[test]
+    fn remove_source_from_mood_errors_on_nonexistent_source() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+        write_config_to(scratch_dir.path(), &test_config());
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        let resp = state.handle(Command::RemoveSource {
+            mood: "deep-focus".to_string(),
+            source: "nonexistent.mp3".to_string(),
+        });
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(matches!(resp, Response::Error(ref msg) if msg.contains("not found")), "unexpected {resp:?}");
+    }
+
+    #[test]
+    fn remove_source_from_mood_errors_on_nonexistent_mood() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        let resp = state.handle(Command::RemoveSource {
+            mood: "not-a-mood".to_string(),
+            source: "a.mp3".to_string(),
+        });
+        std::env::remove_var("XDG_CONFIG_HOME");
+        match resp {
+            Response::Error(msg) => {
+                assert!(msg.contains("not-a-mood"), "should name the bad mood");
+                assert!(msg.contains("code-and-chill"), "should list valid moods");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_source_from_currently_playing_mood_clamps_index() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+        let mut config = test_config();
+        config.moods.get_mut("deep-focus").unwrap().sources = vec!["a.mp3".to_string(), "b.mp3".to_string()];
+        write_config_to(scratch_dir.path(), &config);
+
+        let mut state = DaemonState::new(config, FakeMpv::default());
+        state.current_mood = "deep-focus".to_string();
+        state.current_index = 1;
+        let resp = state.handle(Command::RemoveSource {
+            mood: "deep-focus".to_string(),
+            source: "b.mp3".to_string(),
+        });
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(matches!(resp, Response::Ok), "unexpected {resp:?}");
+        assert_eq!(state.current_index, 0, "index must be clamped to stay in bounds");
     }
 }

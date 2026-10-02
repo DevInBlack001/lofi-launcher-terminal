@@ -226,6 +226,61 @@ pub fn append_source_to_mood(path: &std::path::Path, mood: &str, source: &str) -
     write_result
 }
 
+pub fn remove_source_from_mood(path: &std::path::Path, mood: &str, source: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let is_symlink = std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    let target = if is_symlink { std::fs::canonicalize(path)? } else { path.to_path_buf() };
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path {} has no parent directory", target.display()))?;
+
+    let existing_text = std::fs::read_to_string(&target)?;
+    let mut doc: toml_edit::DocumentMut = existing_text.parse()?;
+
+    let sources_array = doc
+        .get_mut("moods")
+        .and_then(|moods| moods.get_mut(mood))
+        .and_then(|mood_table| mood_table.get_mut("sources"))
+        .and_then(|sources| sources.as_array_mut())
+        .ok_or_else(|| anyhow::anyhow!("could not find moods.{}.sources in config", mood))?;
+
+    let initial_len = sources_array.len();
+    sources_array.retain(|item| {
+        if let Some(item_str) = item.as_str() {
+            item_str != source
+        } else {
+            true
+        }
+    });
+
+    if sources_array.len() == initial_len {
+        anyhow::bail!("source '{}' not found in mood '{}'", source, mood);
+    }
+
+    let text = doc.to_string();
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("config path {} has no file name", target.display()))?;
+    let tmp_path = parent.join(format!(".{}.tmp-{}", file_name.to_string_lossy(), std::process::id()));
+    let existing_permissions = std::fs::metadata(&target).ok().map(|m| m.permissions());
+    let write_result = (|| -> anyhow::Result<()> {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        if let Some(perms) = existing_permissions {
+            std::fs::set_permissions(&tmp_path, perms)?;
+        }
+        std::fs::rename(&tmp_path, &target)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +430,44 @@ sources = ["existing.mp3"]
         assert!(written.contains("# This is my custom comment about ambient sources"),
                 "comment was not preserved: {written}");
         assert!(written.contains("\"new.mp3\""), "new source was not added: {written}");
+    }
+
+    #[test]
+    fn remove_source_from_mood_removes_exact_source_and_preserves_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config_with_comment = r#"default_mood = "code-and-chill"
+
+# This is my custom comment about ambient sources
+[moods.ambient]
+sources = ["first.mp3", "second.mp3", "third.mp3"]
+"#;
+        std::fs::write(&path, config_with_comment).unwrap();
+
+        remove_source_from_mood(&path, "ambient", "second.mp3").unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("# This is my custom comment about ambient sources"),
+                "comment was not preserved: {written}");
+        assert!(written.contains("\"first.mp3\""), "first source was removed: {written}");
+        assert!(!written.contains("\"second.mp3\""), "second source was not removed: {written}");
+        assert!(written.contains("\"third.mp3\""), "third source was removed: {written}");
+    }
+
+    #[test]
+    fn remove_source_from_mood_errors_on_nonexistent_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = r#"default_mood = "code-and-chill"
+[moods.ambient]
+sources = ["first.mp3"]
+"#;
+        std::fs::write(&path, config).unwrap();
+
+        let result = remove_source_from_mood(&path, "ambient", "nonexistent.mp3");
+        assert!(result.is_err(), "should error when source not found");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"), "error should mention source not found: {err}");
     }
 
     #[test]

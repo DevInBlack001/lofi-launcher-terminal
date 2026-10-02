@@ -52,6 +52,8 @@ enum Cmd {
         #[arg(long)]
         no_download: bool,
     },
+    /// Remove a source from a mood's list (does not delete a local file from disk)
+    Remove { mood: String, source: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -175,6 +177,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Quality { level } => DaemonCommand::SetAudioQuality(level.as_str().to_string()),
         Cmd::Tui => unreachable!("handled above"),
         Cmd::Add { .. } => unreachable!("handled above"),
+        Cmd::Remove { mood, source } => DaemonCommand::RemoveSource { mood, source },
     };
 
     let resp = client::send_command(&socket, &cmd)?;

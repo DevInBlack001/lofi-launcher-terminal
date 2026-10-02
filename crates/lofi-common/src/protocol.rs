@@ -17,6 +17,7 @@ pub enum Command {
     SetAudioQuality(String),
     Sources(String),
     PlaySource { mood: String, index: usize, seek_seconds: Option<u64> },
+    RemoveSource { mood: String, source: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +154,18 @@ mod tests {
         let resp = Response::Sources(vec!["/music/a.flac".to_string(), "https://example.com/v".to_string()]);
         match decode_response(encode_response(&resp).trim_end()).unwrap() {
             Response::Sources(list) => assert_eq!(list, vec!["/music/a.flac", "https://example.com/v"]),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trips_remove_source_command() {
+        let cmd = Command::RemoveSource { mood: "ambient".to_string(), source: "https://example.com/mix".to_string() };
+        match decode_command(encode_command(&cmd).trim_end()).unwrap() {
+            Command::RemoveSource { mood, source } => {
+                assert_eq!(mood, "ambient");
+                assert_eq!(source, "https://example.com/mix");
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
