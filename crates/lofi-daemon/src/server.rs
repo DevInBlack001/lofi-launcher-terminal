@@ -4,14 +4,24 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
+pub fn bind(socket_path: &std::path::Path) -> anyhow::Result<UnixListener> {
+    if socket_path.exists() {
+        std::fs::remove_file(socket_path)?;
+    }
+    Ok(UnixListener::bind(socket_path)?)
+}
+
 pub fn serve<M: MpvController>(
     socket_path: &std::path::Path,
     state: Arc<Mutex<DaemonState<M>>>,
 ) -> anyhow::Result<()> {
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path)?;
-    }
-    let listener = UnixListener::bind(socket_path)?;
+    serve_listener(bind(socket_path)?, state)
+}
+
+pub fn serve_listener<M: MpvController>(
+    listener: UnixListener,
+    state: Arc<Mutex<DaemonState<M>>>,
+) -> anyhow::Result<()> {
     for incoming in listener.incoming() {
         let stream = incoming?;
         handle_connection(stream, &state);

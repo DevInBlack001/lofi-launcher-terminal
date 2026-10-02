@@ -74,5 +74,21 @@ fn main() -> anyhow::Result<()> {
     })
     .expect("failed to install signal handler");
 
-    server::serve(&daemon_socket, state)
+    let listener = server::bind(&daemon_socket)?;
+    detach_stderr();
+    server::serve_listener(listener, state)
+}
+
+// The CLI that spawned us pipes our stderr only to report startup failures,
+// and closes the pipe when it exits. Any later write would hit EPIPE and
+// eprintln! would panic, so once startup has succeeded, stop using the pipe.
+fn detach_stderr() {
+    if let Ok(devnull) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+        use std::os::fd::AsRawFd;
+        // SAFETY: dup2 onto fd 2 with a valid, open fd has no memory-safety
+        // implications; devnull stays open for the duration of the call.
+        unsafe {
+            libc::dup2(devnull.as_raw_fd(), libc::STDERR_FILENO);
+        }
+    }
 }

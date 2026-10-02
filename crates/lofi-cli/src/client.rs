@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -30,6 +30,9 @@ fn daemon_binary() -> std::path::PathBuf {
     }
 }
 
+// Bounded so a misbehaving daemon binary can't make the CLI buffer unbounded output.
+const MAX_DAEMON_STDERR_BYTES: u64 = 64 * 1024;
+
 pub fn ensure_daemon_running(socket_path: &Path) -> anyhow::Result<()> {
     if UnixStream::connect(socket_path).is_ok() {
         return Ok(());
@@ -37,14 +40,34 @@ pub fn ensure_daemon_running(socket_path: &Path) -> anyhow::Result<()> {
     // A stale socket file is left for the daemon to replace: it only does so
     // after taking its single-instance lock, whereas deleting it here could
     // unlink the socket of a daemon another terminal just started.
-    std::process::Command::new(daemon_binary())
+    let mut child = std::process::Command::new(daemon_binary())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut child_exited_cleanly = false;
     while UnixStream::connect(socket_path).is_err() {
+        if !child_exited_cleanly {
+            if let Some(status) = child.try_wait()? {
+                // Exit 0 means another daemon already holds the instance lock
+                // (several terminals opened at once); keep waiting for its socket.
+                if status.success() {
+                    child_exited_cleanly = true;
+                } else {
+                    let mut message = String::new();
+                    if let Some(stderr) = child.stderr.take() {
+                        let _ = stderr.take(MAX_DAEMON_STDERR_BYTES).read_to_string(&mut message);
+                    }
+                    let message = message.trim();
+                    if message.is_empty() {
+                        anyhow::bail!("lofi-daemon failed to start ({status})");
+                    }
+                    anyhow::bail!("lofi-daemon failed to start: {message}");
+                }
+            }
+        }
         if std::time::Instant::now() > deadline {
             anyhow::bail!("lofi-daemon did not start within 5 seconds");
         }
@@ -111,8 +134,54 @@ mod tests {
         assert!(matches!(resp, lofi_common::Response::Ok));
     }
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn fake_daemon_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-lofi-daemon");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn ensure_daemon_running_reports_daemon_stderr_immediately_on_failure() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let script = fake_daemon_script(dir.path(), "echo 'mpv not detected, install it' >&2\nexit 1");
+        std::env::set_var("LOFI_DAEMON_BIN", &script);
+        let started = std::time::Instant::now();
+        let result = ensure_daemon_running(&dir.path().join("never.sock"));
+        std::env::remove_var("LOFI_DAEMON_BIN");
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("mpv not detected"), "stderr not surfaced: {err}");
+        assert!(started.elapsed() < Duration::from_secs(2), "should not wait out the timeout");
+    }
+
+    #[test]
+    fn ensure_daemon_running_keeps_waiting_when_spawned_daemon_lost_the_instance_race() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let script = fake_daemon_script(dir.path(), "echo 'another lofi-daemon is already running' >&2\nexit 0");
+        let socket_path = dir.path().join("winner.sock");
+        let winner_path = socket_path.clone();
+        let winner = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            UnixListener::bind(&winner_path).unwrap()
+        });
+        std::env::set_var("LOFI_DAEMON_BIN", &script);
+        let result = ensure_daemon_running(&socket_path);
+        std::env::remove_var("LOFI_DAEMON_BIN");
+        drop(winner.join().unwrap());
+        result.unwrap();
+    }
+
     #[test]
     fn daemon_binary_respects_env_override() {
+        let _guard = env_lock();
         std::env::set_var("LOFI_DAEMON_BIN", "/tmp/some-custom-lofi-daemon");
         let resolved = daemon_binary();
         std::env::remove_var("LOFI_DAEMON_BIN");
@@ -121,6 +190,7 @@ mod tests {
 
     #[test]
     fn classify_source_degrades_gracefully_when_yt_dlp_is_missing() {
+        let _guard = env_lock();
         std::env::set_var("LOFI_YTDLP_BIN", "/nonexistent/definitely-not-yt-dlp");
         let result = classify_source("https://example.com/some-video");
         std::env::remove_var("LOFI_YTDLP_BIN");

@@ -128,6 +128,11 @@ fn main() -> anyhow::Result<()> {
 
 mod tui;
 
+// One lock for every test in this crate that mutates process-wide env vars,
+// since tests run on parallel threads in one process.
+#[cfg(test)]
+pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
