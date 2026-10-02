@@ -15,6 +15,8 @@ pub enum Command {
     Add { source: String, mood: Option<String> },
     SetLoop(bool),
     SetAudioQuality(String),
+    Sources(String),
+    PlaySource { mood: String, index: usize, seek_seconds: Option<u64> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ pub enum Response {
     },
     Moods(Vec<String>),
     Classified(String),
+    Sources(Vec<String>),
 }
 
 pub fn encode_command(cmd: &Command) -> String {
@@ -130,6 +133,26 @@ mod tests {
         let line = encode_command(&Command::SetAudioQuality("max".to_string()));
         match decode_command(line.trim_end()).unwrap() {
             Command::SetAudioQuality(quality) => assert_eq!(quality, "max"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trips_play_source_and_sources_commands() {
+        let cmd = Command::PlaySource { mood: "ambient".to_string(), index: 2, seek_seconds: Some(754) };
+        match decode_command(encode_command(&cmd).trim_end()).unwrap() {
+            Command::PlaySource { mood, index, seek_seconds } => {
+                assert_eq!((mood.as_str(), index, seek_seconds), ("ambient", 2, Some(754)));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match decode_command(encode_command(&Command::Sources("ambient".to_string())).trim_end()).unwrap() {
+            Command::Sources(mood) => assert_eq!(mood, "ambient"),
+            other => panic!("unexpected {other:?}"),
+        }
+        let resp = Response::Sources(vec!["/music/a.flac".to_string(), "https://example.com/v".to_string()]);
+        match decode_response(encode_response(&resp).trim_end()).unwrap() {
+            Response::Sources(list) => assert_eq!(list, vec!["/music/a.flac", "https://example.com/v"]),
             other => panic!("unexpected {other:?}"),
         }
     }

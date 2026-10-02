@@ -94,11 +94,17 @@ pub fn resolve_source(source: &str) -> anyhow::Result<String> {
         .map_err(|_| anyhow::anyhow!("local path '{source}' is not valid UTF-8"))
 }
 
-pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
-    let is_local = std::path::Path::new(source).exists();
-    if is_local {
-        return Ok(None);
-    }
+// Anything that is not an existing file and has no URL scheme is also treated
+// as local (e.g. a file deleted since it was added): handing it to yt-dlp would
+// never find anything, and local sources must never cost a network call.
+pub fn is_local_source(source: &str) -> bool {
+    Path::new(source).exists() || !source.contains("://")
+}
+
+// Errors are returned as messages rather than printed, since the TUI calls
+// this while it owns the terminal and stray stderr output would corrupt it.
+fn fetch_yt_dlp_metadata(source: &str) -> Result<serde_json::Value, String> {
+    let not_detected = || format!("yt-dlp not detected or failed to fetch metadata for '{source}'");
     let yt_dlp_bin = std::env::var("LOFI_YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".to_string());
     let child = std::process::Command::new(&yt_dlp_bin)
         .arg("--dump-json")
@@ -116,13 +122,7 @@ pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn();
-    let mut child = match child {
-        Ok(c) => c,
-        Err(_) => {
-            eprintln!("yt-dlp not detected or failed to fetch metadata for '{source}'");
-            return Ok(None);
-        }
-    };
+    let mut child = child.map_err(|_| not_detected())?;
     let mut stdout = Vec::new();
     if let Some(out) = child.stdout.take() {
         let _ = out.take(MAX_YT_DLP_OUTPUT_BYTES + 1).read_to_end(&mut stdout);
@@ -130,20 +130,24 @@ pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
     if stdout.len() as u64 > MAX_YT_DLP_OUTPUT_BYTES {
         let _ = child.kill();
         let _ = child.wait();
-        eprintln!("yt-dlp returned unexpectedly large metadata for '{source}', ignoring it");
-        return Ok(None);
+        return Err(format!("yt-dlp returned unexpectedly large metadata for '{source}', ignoring it"));
     }
     match child.wait() {
         Ok(status) if status.success() => {}
-        _ => {
-            eprintln!("yt-dlp not detected or failed to fetch metadata for '{source}'");
-            return Ok(None);
-        }
+        _ => return Err(not_detected()),
     }
-    let json: serde_json::Value = match serde_json::from_slice(&stdout) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("could not parse yt-dlp metadata for '{source}': {e}");
+    serde_json::from_slice(&stdout).map_err(|e| format!("could not parse yt-dlp metadata for '{source}': {e}"))
+}
+
+pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
+    let is_local = std::path::Path::new(source).exists();
+    if is_local {
+        return Ok(None);
+    }
+    let json = match fetch_yt_dlp_metadata(source) {
+        Ok(json) => json,
+        Err(message) => {
+            eprintln!("{message}");
             return Ok(None);
         }
     };
@@ -154,6 +158,59 @@ pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
     // default classifier keywords rather than failing on a missing file.
     let config = lofi_common::load_config_or_default(&lofi_common::config_path())?;
     Ok(lofi_common::classify(&config.classifier, title, description))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chapter {
+    pub title: String,
+    pub start_seconds: u64,
+}
+
+// Bounds on what one source's metadata can put on screen.
+pub const MAX_CHAPTERS: usize = 1000;
+pub const MAX_DISPLAY_CHARS: usize = 200;
+
+// Text from a source's metadata is not ours; control characters (escape
+// sequences in particular) would reach the terminal through the TUI.
+pub fn sanitize_for_display(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_DISPLAY_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+pub fn parse_chapters(json: &serde_json::Value) -> Vec<Chapter> {
+    let Some(entries) = json.get("chapters").and_then(|c| c.as_array()) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, entry)| {
+            let start = entry.get("start_time")?.as_f64()?;
+            if !start.is_finite() || start < 0.0 {
+                return None;
+            }
+            let title = entry
+                .get("title")
+                .and_then(|t| t.as_str())
+                .map(sanitize_for_display)
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| format!("chapter {}", i + 1));
+            Some(Chapter { title, start_seconds: start as u64 })
+        })
+        .take(MAX_CHAPTERS)
+        .collect()
+}
+
+pub fn fetch_chapters(source: &str) -> anyhow::Result<Vec<Chapter>> {
+    if is_local_source(source) {
+        return Ok(Vec::new());
+    }
+    let json = fetch_yt_dlp_metadata(source).map_err(|message| anyhow::anyhow!(message))?;
+    Ok(parse_chapters(&json))
 }
 
 #[cfg(test)]
@@ -356,6 +413,114 @@ mod tests {
         let result = classify_source("https://www.youtube.com/playlist?list=PLxyz");
         std::env::remove_var("LOFI_YTDLP_BIN");
         assert_eq!(result.unwrap(), None);
+    }
+
+    const SAMPLE_CHAPTERS_JSON: &str = r#"{
+        "title": "lofi hip hop mix",
+        "is_live": false,
+        "duration": 5020.0,
+        "chapters": [
+            {"start_time": 0.0, "end_time": 151.0, "title": "Kupla - Owls of the Night"},
+            {"start_time": 151.0, "end_time": 312.5, "title": "j'san. x nymano - autumn breeze"},
+            {"start_time": 312.5, "end_time": 5020.0, "title": "Mondo Loops - Late Night Feelings"}
+        ]
+    }"#;
+
+    #[test]
+    fn parse_chapters_reads_titles_and_whole_second_start_times() {
+        let json: serde_json::Value = serde_json::from_str(SAMPLE_CHAPTERS_JSON).unwrap();
+        assert_eq!(
+            parse_chapters(&json),
+            vec![
+                Chapter { title: "Kupla - Owls of the Night".to_string(), start_seconds: 0 },
+                Chapter { title: "j'san. x nymano - autumn breeze".to_string(), start_seconds: 151 },
+                Chapter { title: "Mondo Loops - Late Night Feelings".to_string(), start_seconds: 312 },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_chapters_degrades_gracefully_on_missing_or_malformed_data() {
+        for json in [r#"{"title": "x"}"#, r#"{"chapters": null}"#, r#"{"chapters": "nope"}"#, r#"{"chapters": []}"#] {
+            assert!(parse_chapters(&serde_json::from_str(json).unwrap()).is_empty(), "{json}");
+        }
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"chapters": [
+                {"title": "no start"},
+                {"start_time": -5, "title": "negative"},
+                {"start_time": "12", "title": "string start"},
+                {"start_time": 42.9},
+                {"start_time": 60, "title": "evil\u001b[2Jtitle\nnext"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_chapters(&json),
+            vec![
+                Chapter { title: "chapter 4".to_string(), start_seconds: 42 },
+                Chapter { title: "evil [2Jtitle next".to_string(), start_seconds: 60 },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_chapters_clips_overlong_titles_and_caps_the_count() {
+        let long_title = "x".repeat(10_000);
+        let entries: Vec<String> =
+            (0..5_000).map(|i| format!(r#"{{"start_time": {i}, "title": "{long_title}"}}"#)).collect();
+        let json: serde_json::Value = serde_json::from_str(&format!(r#"{{"chapters": [{}]}}"#, entries.join(","))).unwrap();
+        let chapters = parse_chapters(&json);
+        assert_eq!(chapters.len(), MAX_CHAPTERS);
+        assert!(chapters.iter().all(|c| c.title.chars().count() <= MAX_DISPLAY_CHARS));
+    }
+
+    #[test]
+    fn fetch_chapters_never_runs_yt_dlp_for_a_local_source() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(dir.path(), SAMPLE_CHAPTERS_JSON);
+        let local = dir.path().join("mix.flac");
+        std::fs::write(&local, b"").unwrap();
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let existing = fetch_chapters(local.to_str().unwrap());
+        let missing = fetch_chapters("/music/deleted-since.flac");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert!(existing.unwrap().is_empty());
+        assert!(missing.unwrap().is_empty());
+        assert!(!dir.path().join("yt-dlp-args").exists(), "yt-dlp was invoked for a local source");
+    }
+
+    #[test]
+    fn fetch_chapters_for_a_url_uses_the_same_safe_yt_dlp_invocation() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(dir.path(), SAMPLE_CHAPTERS_JSON);
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let chapters = fetch_chapters("https://www.youtube.com/watch?v=abc&list=PLxyz");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert_eq!(chapters.unwrap().len(), 3);
+        let args = recorded_yt_dlp_args(dir.path());
+        let separator = args.iter().position(|a| a == "--").expect("missing -- separator");
+        assert_eq!(args[separator + 1], "https://www.youtube.com/watch?v=abc&list=PLxyz");
+        assert!(args[..separator].contains(&"--no-playlist".to_string()));
+        assert!(args[..separator].contains(&"--socket-timeout".to_string()));
+    }
+
+    #[test]
+    fn fetch_chapters_reports_a_missing_yt_dlp_as_an_error() {
+        let _guard = env_lock();
+        std::env::set_var("LOFI_YTDLP_BIN", "/nonexistent/definitely-not-yt-dlp");
+        let result = fetch_chapters("https://example.com/some-video");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn is_local_source_treats_anything_without_a_url_scheme_as_local() {
+        assert!(is_local_source("/music/a.flac"));
+        assert!(is_local_source("/music/deleted-since.flac"));
+        assert!(!is_local_source("https://www.youtube.com/watch?v=abc"));
+        assert!(!is_local_source("ytdl://abc"));
     }
 
     #[test]

@@ -14,6 +14,9 @@ pub struct StartOptions<'a> {
     // yt-dlp format selector for mpv's ytdl hook. mpv only consults it for
     // sources the hook resolves (URLs); local files ignore it entirely.
     pub ytdl_format: &'a str,
+    // Where to begin playback (a chapter the user picked). When set, the
+    // random seek into long sources is skipped: the user chose the position.
+    pub seek_seconds: Option<u64>,
 }
 
 pub trait MpvController {
@@ -260,6 +263,7 @@ impl MpvController for RealMpv {
             known_duration_seconds: None,
             long_source_threshold_seconds: u64::MAX,
             ytdl_format: lofi_common::ytdl_format_for(lofi_common::DEFAULT_AUDIO_QUALITY),
+            seek_seconds: None,
         };
         self.start_source_with_options(source, &options)
     }
@@ -271,10 +275,19 @@ impl MpvController for RealMpv {
         // bestvideo+bestaudio) would stream video that --no-video throws away.
         // The hook reads it at load time, so it must be set before loadfile.
         self.send(serde_json::json!({ "command": ["set_property", "ytdl-format", options.ytdl_format] }))?;
+        // The start option is applied by mpv itself as the file opens, so a
+        // chapter position can't race the load the way a later time-pos set
+        // would. It persists across loads, hence the explicit reset otherwise.
+        let start = options.seek_seconds.map_or_else(|| "none".to_string(), |s| s.to_string());
+        self.send(serde_json::json!({ "command": ["set_property", "start", start] }))?;
         self.send(serde_json::json!({ "command": ["loadfile", source, "replace"] }))?;
         // loop-file survives loadfile (and may be set in the user's mpv.conf); a
         // looping source never reaches its end, which would block auto-advance.
         self.send(serde_json::json!({ "command": ["set_property", "loop-file", "no"] }))?;
+
+        if options.seek_seconds.is_some() {
+            return Ok(());
+        }
 
         // Duration discovery can take seconds (yt-dlp resolution), and the caller
         // holds the daemon's state lock, so it happens off-thread. The thread only
@@ -444,7 +457,65 @@ mod tests {
             known_duration_seconds,
             long_source_threshold_seconds: 1200,
             ytdl_format: "worstaudio/worst",
+            seek_seconds: None,
         }
+    }
+
+    // For each loadfile, the start option value set since the previous loadfile.
+    fn start_set_before_each_load(recorded: &[serde_json::Value]) -> Vec<Option<String>> {
+        let mut result = Vec::new();
+        let mut pending = None;
+        for cmd in recorded {
+            if is_set(cmd, "start") {
+                pending = cmd["command"][2].as_str().map(str::to_string);
+            } else if cmd["command"][0] == "loadfile" {
+                result.push(pending.take());
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn explicit_chapter_seek_starts_the_file_there_and_skips_the_random_seek() {
+        let server = FakeMpvServer::start(3.0 * 3600.0, Duration::ZERO);
+        let mut mpv = server.mpv();
+        let options = StartOptions { seek_seconds: Some(754), ..opts(Some(3 * 3600)) };
+        mpv.start_source_with_options("https://example.com/3h-mix", &options).unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        let recorded = server.recorded();
+        assert_eq!(start_set_before_each_load(&recorded), vec![Some("754".to_string())]);
+        assert!(
+            !recorded.iter().any(|c| is_set(c, "time-pos")),
+            "a random seek would override the chapter the user picked: {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn every_start_without_a_seek_resets_the_start_option() {
+        let server = FakeMpvServer::start(180.0, Duration::ZERO);
+        let mut mpv = server.mpv();
+        mpv.start_source_with_options("https://example.com/mix", &StartOptions { seek_seconds: Some(60), ..opts(None) }).unwrap();
+        mpv.start_source_with_options("/music/local.flac", &opts(None)).unwrap();
+        assert_eq!(
+            start_set_before_each_load(&server.recorded()),
+            vec![Some("60".to_string()), Some("none".to_string())],
+            "a chapter offset must never leak into the next source"
+        );
+    }
+
+    #[test]
+    fn chapter_seek_makes_a_pending_probe_for_the_previous_source_stale() {
+        let server = FakeMpvServer::start(3.0 * 3600.0, Duration::from_millis(600));
+        let mut mpv = server.mpv();
+        mpv.start_source_with_options("https://example.com/3h-mix", &opts(None)).unwrap();
+        mpv.start_source_with_options("https://example.com/3h-mix", &StartOptions { seek_seconds: Some(754), ..opts(None) })
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !server.recorded().iter().any(|c| is_set(c, "time-pos")),
+            "the earlier load's probe overrode the chapter seek: {:?}",
+            server.recorded()
+        );
     }
 
     fn is_set(cmd: &serde_json::Value, property: &str) -> bool {

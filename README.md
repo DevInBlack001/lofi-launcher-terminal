@@ -112,8 +112,17 @@ lofi loop on / lofi loop off  # auto-advance to the next source when one finishe
 lofi quality min / lofi quality max  # audio stream quality for URL sources (default min)
 lofi add <url>          # classify a URL into a mood and add it
 lofi add <url-or-path> --mood ambient  # add it to a specific mood directly
-lofi tui                # interactive mood picker
+lofi tui                # interactive browser: moods, their sources, and chapters
 ```
+
+In `lofi tui`, Enter on a mood lists its sources (Space plays the whole mood
+right away). Enter on a local file plays it. Enter on a URL looks up its
+chapter markers (the timestamped tracklist many mix videos have) and, if it
+has any, lists them so Enter can jump straight to one; a URL without chapters
+just plays from the start. Space on a source plays it from the start without
+looking anything up, and Esc or Backspace goes back up a level. Local files
+are never looked up, so browsing an offline mood stays offline. `l` toggles
+loop and `a` toggles audio quality.
 
 Classification works from a URL's title and description, so `lofi add` on a
 local file path always needs `--mood`. Local paths are stored as absolute

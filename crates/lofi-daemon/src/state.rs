@@ -46,6 +46,10 @@ impl<M: MpvController> DaemonState<M> {
     }
 
     fn start_current_mood(&mut self) -> Response {
+        self.start_current_mood_at(None)
+    }
+
+    fn start_current_mood_at(&mut self, seek_seconds: Option<u64>) -> Response {
         let mood = match self.config.moods.get(&self.current_mood) {
             Some(m) => m,
             None => return Response::Error(format!("unknown mood: {}", self.current_mood)),
@@ -56,6 +60,7 @@ impl<M: MpvController> DaemonState<M> {
                     known_duration_seconds: self.known_duration_seconds,
                     long_source_threshold_seconds: (self.config.long_source_minutes as u64) * 60,
                     ytdl_format: lofi_common::ytdl_format_for(&self.config.audio_quality),
+                    seek_seconds,
                 };
                 let result = self.mpv.start_source_with_options(source, &options);
                 if let Err(e) = result {
@@ -254,6 +259,35 @@ impl<M: MpvController> DaemonState<M> {
                 self.config.audio_quality = quality;
                 Response::Ok
             }
+            Command::Sources(name) => match self.config.moods.get(&name) {
+                Some(mood) => Response::Sources(mood.sources.clone()),
+                None => Response::Error(format!("unknown mood '{name}', valid moods: {}", self.valid_mood_names())),
+            },
+            Command::PlaySource { mood, index, seek_seconds } => {
+                let Some(entry) = self.config.moods.get(&mood) else {
+                    return Response::Error(format!(
+                        "unknown mood '{mood}', valid moods: {}",
+                        self.valid_mood_names()
+                    ));
+                };
+                let len = entry.sources.len();
+                if len == 0 {
+                    return Response::Error(format!("mood '{mood}' has no sources configured"));
+                }
+                if index >= len {
+                    return Response::Error(format!(
+                        "source {index} is out of range, mood '{mood}' has {len} source(s)"
+                    ));
+                }
+                self.current_mood = mood;
+                self.current_index = index;
+                self.rapid_end_streak = 0;
+                if self.session_count > 0 {
+                    self.start_current_mood_at(seek_seconds)
+                } else {
+                    Response::Ok
+                }
+            }
             Command::Add { source, mood } => {
                 let target_mood = match mood {
                     Some(name) => name,
@@ -309,6 +343,7 @@ mod tests {
         paused: bool,
         last_seek_requested: bool,
         last_ytdl_format: Option<String>,
+        last_seek_seconds: Option<u64>,
     }
 
     impl MpvController for FakeMpv {
@@ -325,6 +360,7 @@ mod tests {
                 Some(d) if d > options.long_source_threshold_seconds
             );
             self.last_ytdl_format = Some(options.ytdl_format.to_string());
+            self.last_seek_seconds = options.seek_seconds;
             Ok(())
         }
         fn stop(&mut self) -> anyhow::Result<()> {
@@ -542,6 +578,98 @@ mod tests {
         state.handle(Command::Next);
         assert!(!state.mpv.paused);
         assert_eq!(status_flags(&mut state), (true, false));
+    }
+
+    fn play(mood: &str, index: usize, seek_seconds: Option<u64>) -> Command {
+        Command::PlaySource { mood: mood.to_string(), index, seek_seconds }
+    }
+
+    fn chapters_config() -> Config {
+        let mut config = two_source_config();
+        config.moods.insert(
+            "ambient".to_string(),
+            Mood { sources: vec!["/music/local.flac".to_string(), "https://example.com/mix".to_string()] },
+        );
+        config
+    }
+
+    #[test]
+    fn play_source_switches_mood_and_index_and_starts_at_the_requested_chapter() {
+        let mut state = DaemonState::new(chapters_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        assert!(matches!(state.handle(play("ambient", 1, Some(754))), Response::Ok));
+        assert_eq!(state.mpv.started.last().map(String::as_str), Some("https://example.com/mix"));
+        assert_eq!(state.mpv.last_seek_seconds, Some(754));
+        assert_eq!((state.current_mood.as_str(), state.current_index), ("ambient", 1));
+        match state.handle(Command::Status) {
+            Response::Status { mood, current_source, playing, .. } => {
+                assert_eq!(mood, "ambient");
+                assert_eq!(current_source.as_deref(), Some("https://example.com/mix"));
+                assert!(playing);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn play_source_without_a_seek_plays_a_local_file_from_the_start() {
+        let mut state = DaemonState::new(chapters_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        state.handle(play("ambient", 1, Some(754)));
+        assert!(matches!(state.handle(play("ambient", 0, None)), Response::Ok));
+        assert_eq!(state.mpv.started.last().map(String::as_str), Some("/music/local.flac"));
+        assert_eq!(state.mpv.last_seek_seconds, None);
+    }
+
+    #[test]
+    fn ordinary_starts_and_auto_advance_never_carry_a_seek() {
+        let mut state = DaemonState::new(chapters_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        assert_eq!(state.mpv.last_seek_seconds, None);
+        state.handle(play("ambient", 0, Some(30)));
+        let now = well_after_start(&state);
+        state.handle_natural_end_of_file_at(now);
+        assert_eq!(state.mpv.started.last().map(String::as_str), Some("https://example.com/mix"));
+        assert_eq!(state.mpv.last_seek_seconds, None, "the next source must start from its beginning");
+    }
+
+    #[test]
+    fn play_source_rejects_unknown_moods_and_out_of_range_indexes_without_changing_anything() {
+        let mut state = DaemonState::new(chapters_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        let before = state.mpv.started.clone();
+        match state.handle(play("not-a-mood", 0, None)) {
+            Response::Error(msg) => assert!(msg.contains("not-a-mood") && msg.contains("ambient"), "{msg}"),
+            other => panic!("unexpected {other:?}"),
+        }
+        match state.handle(play("ambient", 2, None)) {
+            Response::Error(msg) => assert!(msg.contains('2') && msg.contains("ambient"), "{msg}"),
+            other => panic!("unexpected {other:?}"),
+        }
+        match state.handle(play("deep-focus", 0, None)) {
+            Response::Error(msg) => assert!(msg.contains("no sources configured"), "{msg}"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(state.mpv.started, before);
+        assert_eq!((state.current_mood.as_str(), state.current_index), ("code-and-chill", 0));
+    }
+
+    #[test]
+    fn play_source_with_no_session_selects_without_starting_playback() {
+        let mut state = DaemonState::new(chapters_config(), FakeMpv::default());
+        assert!(matches!(state.handle(play("ambient", 1, Some(5))), Response::Ok));
+        assert!(state.mpv.started.is_empty());
+        assert_eq!((state.current_mood.as_str(), state.current_index), ("ambient", 1));
+    }
+
+    #[test]
+    fn sources_lists_a_moods_sources_in_order_or_errors_on_unknown_mood() {
+        let mut state = DaemonState::new(chapters_config(), FakeMpv::default());
+        match state.handle(Command::Sources("ambient".to_string())) {
+            Response::Sources(list) => assert_eq!(list, vec!["/music/local.flac", "https://example.com/mix"]),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(matches!(state.handle(Command::Sources("nope".to_string())), Response::Error(_)));
     }
 
     fn status_quality(state: &mut DaemonState<FakeMpv>) -> String {

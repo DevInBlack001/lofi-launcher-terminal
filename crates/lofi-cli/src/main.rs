@@ -35,7 +35,7 @@ enum Cmd {
     Loop { state: OnOff },
     /// Pick audio-only stream quality for URL sources (min saves bandwidth); applies from the next source
     Quality { level: QualityLevel },
-    /// Open an interactive mood picker
+    /// Open an interactive browser for moods, their sources, and chapters of URL sources
     Tui,
     /// Classify a source into a mood (or use an explicit mood) and add it to the config
     Add {
@@ -115,6 +115,11 @@ fn print_response(resp: lofi_common::Response) {
             }
         }
         lofi_common::Response::Classified(mood) => println!("added to mood: {mood}"),
+        lofi_common::Response::Sources(sources) => {
+            for source in sources {
+                println!("{source}");
+            }
+        }
     }
 }
 
