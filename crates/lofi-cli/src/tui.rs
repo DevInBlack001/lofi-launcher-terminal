@@ -253,15 +253,27 @@ impl Browser {
         self.awaiting.as_ref().map(|(_, _, source)| source.as_str())
     }
 
-    fn request_delete(&mut self) -> Option<(String, String)> {
+    // Only 'd' calls this. It only arms; it never confirms on its own, so a
+    // bare Enter press can never be mistaken for arming a delete.
+    fn arm_delete(&mut self) {
+        if let Level::Sources { sources, .. } = &self.level {
+            if let Some(source) = sources.get(self.source_selected) {
+                self.delete_pending = Some(source.clone());
+            }
+        }
+    }
+
+    // Only Enter calls this. It never arms a delete itself, it only checks
+    // whether the currently selected source already has one armed (via 'd')
+    // and, if so, confirms it. This keeps a plain Enter press on an
+    // unarmed source doing its normal job (play/show chapters).
+    fn confirm_delete_if_pending(&mut self) -> Option<(String, String)> {
         match &self.level {
             Level::Sources { mood, sources } if self.source_selected < sources.len() => {
-                if let Some(source) = sources.get(self.source_selected) {
-                    if self.delete_pending.as_ref() == Some(source) {
-                        self.delete_pending = None;
-                        return Some((mood.clone(), source.clone()));
-                    }
-                    self.delete_pending = Some(source.clone());
+                let source = sources.get(self.source_selected)?;
+                if self.delete_pending.as_ref() == Some(source) {
+                    self.delete_pending = None;
+                    return Some((mood.clone(), source.clone()));
                 }
                 None
             }
@@ -486,12 +498,13 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                         None
                     }
                     KeyCode::Enter => {
-                        if let Some((mood, source)) = browser.request_delete() {
+                        if let Some((mood, source)) = browser.confirm_delete_if_pending() {
                             let action = Action::RemoveSource { mood, source };
                             last_error = perform(action, &socket, &mut browser, &chapter_results_tx);
                             refresh_status(&socket, &mut view);
                             None
                         } else {
+                            browser.cancel_delete();
                             let action = browser.enter();
                             last_error = perform(action, &socket, &mut browser, &chapter_results_tx);
                             refresh_status(&socket, &mut view);
@@ -506,7 +519,7 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                         None
                     }
                     KeyCode::Char('d') => {
-                        browser.request_delete();
+                        browser.arm_delete();
                         None
                     }
                     KeyCode::Char('p') => Some(lofi_common::Command::Pause),
@@ -675,12 +688,12 @@ mod tests {
     }
 
     #[test]
-    fn delete_requires_confirmation_with_two_presses() {
+    fn delete_requires_d_then_enter_to_confirm() {
         let mut browser = browser_in_ambient();
         assert_eq!(browser.delete_pending, None);
-        browser.request_delete();
+        browser.arm_delete();
         assert_eq!(browser.delete_pending.as_deref(), Some(LOCAL));
-        let result = browser.request_delete();
+        let result = browser.confirm_delete_if_pending();
         assert_eq!(result, Some(("ambient".to_string(), LOCAL.to_string())));
         assert_eq!(browser.delete_pending, None);
     }
@@ -688,9 +701,22 @@ mod tests {
     #[test]
     fn delete_cancels_on_navigation() {
         let mut browser = browser_in_ambient();
-        browser.request_delete();
+        browser.arm_delete();
         assert_eq!(browser.delete_pending.as_deref(), Some(LOCAL));
         browser.down();
+        assert_eq!(browser.delete_pending, None);
+    }
+
+    #[test]
+    fn plain_enter_never_arms_or_confirms_a_delete() {
+        // The real bug this guards against: Enter must never call the
+        // arming half of the delete flow, only 'd' may. A bare Enter on a
+        // source that was never armed with 'd' must leave delete_pending
+        // untouched and report nothing to confirm.
+        let mut browser = browser_in_ambient();
+        assert_eq!(browser.delete_pending, None);
+        let result = browser.confirm_delete_if_pending();
+        assert_eq!(result, None);
         assert_eq!(browser.delete_pending, None);
     }
 }
