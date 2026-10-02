@@ -393,6 +393,16 @@ impl Browser {
 type ChapterResult = (String, Result<Vec<Chapter>, String>);
 type MetadataResult = (String, Result<SourceMetadata, String>);
 
+struct SessionGuard {
+    socket: PathBuf,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        let _ = client::send_command(&self.socket, &lofi_common::Command::Unregister);
+    }
+}
+
 fn spawn_chapter_fetch(source: String, results: mpsc::Sender<ChapterResult>) {
     std::thread::spawn(move || {
         let result = client::fetch_chapters(&source).map_err(|e| e.to_string());
@@ -453,6 +463,9 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
         lofi_common::Response::Moods(names) => names,
         other => anyhow::bail!("unexpected response listing moods: {other:?}"),
     };
+
+    client::send_command(&socket, &lofi_common::Command::Register)?;
+    let _session_guard = SessionGuard { socket: socket.clone() };
 
     let mut view = DaemonView { mood: "unknown".to_string(), state_label: "unknown", ..Default::default() };
     refresh_status(&socket, &mut view);
