@@ -5,9 +5,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{Arc, Mutex};
 
 fn runtime_dir() -> std::path::PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .expect("XDG_RUNTIME_DIR must be set; lofi-daemon targets Linux session environments")
+    lofi_common::xdg_absolute_dir("XDG_RUNTIME_DIR").expect(
+        "XDG_RUNTIME_DIR must be set to an absolute path; lofi-daemon targets Linux session environments",
+    )
 }
 
 // Several terminals opening at once each spawn a daemon. Without a single

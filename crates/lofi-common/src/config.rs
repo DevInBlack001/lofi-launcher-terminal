@@ -29,9 +29,22 @@ pub fn default_config_toml() -> &'static str {
     include_str!("../../../config.default.toml")
 }
 
+// The XDG base directory spec requires these variables to hold absolute paths
+// and says anything else must be ignored. An empty XDG_RUNTIME_DIR in
+// particular would put the sockets (mpv's accepts a "run" command) in the
+// current directory instead of the user-only runtime dir.
+pub fn xdg_absolute_dir(var: &str) -> Option<PathBuf> {
+    let value = std::env::var_os(var)?;
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 pub fn config_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
+    let base = xdg_absolute_dir("XDG_CONFIG_HOME")
         .unwrap_or_else(|| {
             let home = std::env::var_os("HOME").expect("HOME must be set");
             PathBuf::from(home).join(".config")
@@ -142,7 +155,34 @@ mod tests {
     }
 
     #[test]
+    fn xdg_absolute_dir_rejects_empty_and_relative_values() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("LOFI_TEST_XDG_DIR", "");
+        assert_eq!(xdg_absolute_dir("LOFI_TEST_XDG_DIR"), None);
+        std::env::set_var("LOFI_TEST_XDG_DIR", "relative/dir");
+        assert_eq!(xdg_absolute_dir("LOFI_TEST_XDG_DIR"), None);
+        std::env::set_var("LOFI_TEST_XDG_DIR", "/run/user/1000");
+        assert_eq!(xdg_absolute_dir("LOFI_TEST_XDG_DIR"), Some(PathBuf::from("/run/user/1000")));
+        std::env::remove_var("LOFI_TEST_XDG_DIR");
+        assert_eq!(xdg_absolute_dir("LOFI_TEST_XDG_DIR"), None);
+    }
+
+    #[test]
+    fn config_path_treats_empty_or_relative_xdg_config_home_as_unset() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let home = std::env::var_os("HOME").expect("HOME must be set for this test");
+        let fallback = PathBuf::from(home).join(".config/lofi-launcher/config.toml");
+        for bad in ["", "relative/config"] {
+            std::env::set_var("XDG_CONFIG_HOME", bad);
+            let path = config_path();
+            std::env::remove_var("XDG_CONFIG_HOME");
+            assert_eq!(path, fallback, "XDG_CONFIG_HOME={bad:?} was not ignored");
+        }
+    }
+
+    #[test]
     fn config_path_respects_xdg_config_home() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("XDG_CONFIG_HOME", "/tmp/lofi-test-xdg");
         let path = config_path();
         assert_eq!(path, std::path::PathBuf::from("/tmp/lofi-test-xdg/lofi-launcher/config.toml"));

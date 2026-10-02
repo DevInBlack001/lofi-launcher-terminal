@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -135,10 +136,8 @@ const MPRIS_SCRIPT_CANDIDATES: [&str; 5] = [
 // mpv also auto-loads scripts from the user's own config directory, which can't
 // be a static candidate since it depends on $HOME/$XDG_CONFIG_HOME at runtime.
 fn user_mpv_script_dir_candidate() -> Option<PathBuf> {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok()?;
+    let base = lofi_common::xdg_absolute_dir("XDG_CONFIG_HOME")
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
     Some(base.join("mpv").join("scripts").join("mpris.so"))
 }
 
@@ -200,6 +199,9 @@ impl RealMpv {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        // Defense in depth beyond $XDG_RUNTIME_DIR's own 0700: this socket accepts
+        // mpv's "run" command, so nobody but the owner may connect.
+        std::fs::set_permissions(&mpv.socket_path, std::fs::Permissions::from_mode(0o600))?;
 
         Ok(mpv)
     }
@@ -476,6 +478,8 @@ mod tests {
 
         let mut mpv = RealMpv::spawn(socket_path.clone()).unwrap();
         assert!(UnixStream::connect(&socket_path).is_ok());
+        let mode = std::fs::metadata(&socket_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mpv IPC socket must be owner-only");
         mpv.quit().unwrap();
         assert!(mpv.child.try_wait().unwrap().is_some(), "quit must leave mpv exited");
     }

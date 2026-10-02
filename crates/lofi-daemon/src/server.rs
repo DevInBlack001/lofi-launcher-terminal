@@ -1,6 +1,7 @@
 use crate::mpv::MpvController;
 use crate::state::DaemonState;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +9,10 @@ pub fn bind(socket_path: &std::path::Path) -> anyhow::Result<UnixListener> {
     if socket_path.exists() {
         std::fs::remove_file(socket_path)?;
     }
-    Ok(UnixListener::bind(socket_path)?)
+    let listener = UnixListener::bind(socket_path)?;
+    // Defense in depth beyond $XDG_RUNTIME_DIR's own 0700 permissions.
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 pub fn serve<M: MpvController>(
@@ -113,6 +117,9 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+
+        let mode = std::fs::metadata(&socket_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "daemon socket must be owner-only");
 
         let mut stream = UnixStream::connect(&socket_path).unwrap();
         let line = lofi_common::encode_command(&lofi_common::Command::Status);

@@ -42,9 +42,8 @@ enum Cmd {
 }
 
 fn runtime_socket() -> std::path::PathBuf {
-    let run_dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .expect("XDG_RUNTIME_DIR must be set; lofi targets Linux session environments");
+    let run_dir = lofi_common::xdg_absolute_dir("XDG_RUNTIME_DIR")
+        .expect("XDG_RUNTIME_DIR must be set to an absolute path; lofi targets Linux session environments");
     run_dir.join("lofi-daemon.sock")
 }
 
