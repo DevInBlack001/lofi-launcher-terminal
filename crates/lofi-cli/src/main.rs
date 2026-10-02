@@ -178,7 +178,11 @@ fn main() -> anyhow::Result<()> {
     };
 
     let resp = client::send_command(&socket, &cmd)?;
+    let is_error = matches!(resp, lofi_common::Response::Error(_));
     print_response(resp);
+    if is_error {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
