@@ -76,6 +76,21 @@ pub fn ensure_daemon_running(socket_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+// mpv runs inside the daemon, whose working directory is whichever shell
+// happened to spawn it, so a relative path must be made absolute here.
+pub fn resolve_source(source: &str) -> anyhow::Result<String> {
+    let path = Path::new(source);
+    if !path.exists() {
+        return Ok(source.to_string());
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| anyhow::anyhow!("could not resolve local path '{source}': {e}"))?;
+    canonical
+        .into_os_string()
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("local path '{source}' is not valid UTF-8"))
+}
+
 pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
     let is_local = std::path::Path::new(source).exists();
     if is_local {
@@ -213,6 +228,29 @@ mod tests {
         std::env::remove_var("LOFI_YTDLP_BIN");
         std::env::remove_var("XDG_CONFIG_HOME");
         assert_eq!(result.unwrap(), Some("rainy-day".to_string()));
+    }
+
+    #[test]
+    fn resolve_source_makes_existing_local_paths_absolute_and_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let file = dir.path().join("mix.mp3");
+        std::fs::write(&file, b"").unwrap();
+        let indirect = dir.path().join("sub").join("..").join("mix.mp3");
+
+        let resolved = resolve_source(indirect.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&file).unwrap().to_str().unwrap());
+        assert!(std::path::Path::new(&resolved).is_absolute());
+        assert!(!resolved.contains(".."));
+    }
+
+    #[test]
+    fn resolve_source_leaves_urls_and_missing_paths_untouched() {
+        assert_eq!(
+            resolve_source("https://www.youtube.com/watch?v=abc").unwrap(),
+            "https://www.youtube.com/watch?v=abc"
+        );
+        assert_eq!(resolve_source("./definitely-missing.mp3").unwrap(), "./definitely-missing.mp3");
     }
 
     #[test]

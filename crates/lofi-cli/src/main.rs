@@ -87,9 +87,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Cmd::Add { source, mood } = &cli.command {
+        let source = client::resolve_source(source)?;
         let resolved_mood = match mood {
             Some(m) => Some(m.clone()),
-            None => client::classify_source(source)?,
+            None => client::classify_source(&source)?,
         };
         if resolved_mood.is_none() {
             eprintln!(
@@ -99,7 +100,7 @@ fn main() -> anyhow::Result<()> {
         }
         let resp = client::send_command(
             &socket,
-            &DaemonCommand::Add { source: source.clone(), mood: resolved_mood },
+            &DaemonCommand::Add { source, mood: resolved_mood },
         )?;
         print_response(resp);
         return Ok(());
