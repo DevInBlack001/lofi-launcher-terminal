@@ -168,6 +168,10 @@ pub fn run(socket: &Path, source: &str, opts: &AddOptions) -> anyhow::Result<i32
 // A URL source: probe for a playlist first, then add each resulting source
 // through the daemon's ordinary one-source Add.
 fn add_url(socket: &Path, source: &str, opts: &AddOptions) -> anyhow::Result<i32> {
+    // Strips a `list=RD...` auto-mix marker before anything else touches the
+    // URL, so an accidental mix link probes, classifies, and gets stored as
+    // just the single video, not the whole auto-generated mix.
+    let source = &client::strip_auto_mix_list(source);
     match client::probe_url(source) {
         Probe::Playlist { title, entries, truncated_from } => {
             add_playlist(socket, &title, &entries, truncated_from, opts)

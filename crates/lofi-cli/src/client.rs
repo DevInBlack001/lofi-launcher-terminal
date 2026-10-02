@@ -272,7 +272,36 @@ pub fn parse_probe(json: &serde_json::Value) -> Probe {
     }
 }
 
+// YouTube tacks a `list=RD...` (and usually `start_radio=1`) onto a video
+// URL whenever an autoplay mix was running when the link was copied. That
+// mix is auto-generated and usually not what someone meant to add by
+// pasting "this video"; a real user-curated playlist uses `list=PL...` (or
+// other non-RD prefixes) and is left alone. Stripping it here makes such a
+// link probe and classify as the single video, matching what copying a
+// YouTube link while a mix plays actually means in practice.
+pub fn strip_auto_mix_list(source: &str) -> String {
+    let Some((base, query)) = source.split_once('?') else {
+        return source.to_string();
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|param| {
+            let is_auto_mix_list = param
+                .strip_prefix("list=")
+                .is_some_and(|value| value.starts_with("RD"));
+            !is_auto_mix_list && !param.starts_with("start_radio=")
+        })
+        .collect();
+    if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    }
+}
+
 // Callers must have ruled out local sources first: this always runs yt-dlp.
+// Callers are expected to have already applied strip_auto_mix_list, since
+// the cleaned URL is also what should end up stored as the source.
 pub fn probe_url(source: &str) -> Probe {
     match run_yt_dlp_json(&["--flat-playlist", "--dump-single-json", "--no-warnings"], source) {
         Ok(json) => parse_probe(&json),
@@ -522,6 +551,27 @@ mod tests {
     use super::test_support::*;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn strip_auto_mix_list_removes_an_auto_generated_mix_marker() {
+        let url = "https://www.youtube.com/watch?v=w4TNGhSj2tc&list=RDw4TNGhSj2tc&start_radio=1";
+        assert_eq!(
+            strip_auto_mix_list(url),
+            "https://www.youtube.com/watch?v=w4TNGhSj2tc"
+        );
+    }
+
+    #[test]
+    fn strip_auto_mix_list_leaves_a_real_playlist_alone() {
+        let url = "https://www.youtube.com/watch?v=abc123&list=PLsomeUserCuratedPlaylist";
+        assert_eq!(strip_auto_mix_list(url), url);
+    }
+
+    #[test]
+    fn strip_auto_mix_list_leaves_a_url_with_no_query_alone() {
+        let url = "https://www.youtube.com/watch?v=abc123";
+        assert_eq!(strip_auto_mix_list(url), url);
+    }
 
     #[test]
     fn send_command_round_trips_against_fake_server() {
