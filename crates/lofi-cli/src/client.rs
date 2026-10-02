@@ -76,6 +76,9 @@ pub fn ensure_daemon_running(socket_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Single-video metadata (with its full formats list) is well under this.
+const MAX_YT_DLP_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
+
 // mpv runs inside the daemon, whose working directory is whichever shell
 // happened to spawn it, so a relative path must be made absolute here.
 pub fn resolve_source(source: &str) -> anyhow::Result<String> {
@@ -97,19 +100,53 @@ pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
         return Ok(None);
     }
     let yt_dlp_bin = std::env::var("LOFI_YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".to_string());
-    let output = std::process::Command::new(&yt_dlp_bin)
+    let child = std::process::Command::new(&yt_dlp_bin)
         .arg("--dump-json")
         .arg("--skip-download")
+        // A source is one playable unit; a playlist URL would otherwise emit
+        // one JSON document per entry, unbounded and unparseable as one value.
+        .arg("--no-playlist")
+        .arg("--socket-timeout")
+        .arg("10")
+        // Without the separator a source like "--config-locations=..." is
+        // parsed by yt-dlp as an option instead of a URL.
+        .arg("--")
         .arg(source)
-        .output();
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => {
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(_) => {
             eprintln!("yt-dlp not detected or failed to fetch metadata for '{source}'");
             return Ok(None);
         }
     };
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let mut stdout = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        let _ = out.take(MAX_YT_DLP_OUTPUT_BYTES + 1).read_to_end(&mut stdout);
+    }
+    if stdout.len() as u64 > MAX_YT_DLP_OUTPUT_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("yt-dlp returned unexpectedly large metadata for '{source}', ignoring it");
+        return Ok(None);
+    }
+    match child.wait() {
+        Ok(status) if status.success() => {}
+        _ => {
+            eprintln!("yt-dlp not detected or failed to fetch metadata for '{source}'");
+            return Ok(None);
+        }
+    }
+    let json: serde_json::Value = match serde_json::from_slice(&stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("could not parse yt-dlp metadata for '{source}': {e}");
+            return Ok(None);
+        }
+    };
     let title = json.get("title").and_then(|v| v.as_str()).unwrap_or("");
     let description = json.get("description").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -251,6 +288,60 @@ mod tests {
             "https://www.youtube.com/watch?v=abc"
         );
         assert_eq!(resolve_source("./definitely-missing.mp3").unwrap(), "./definitely-missing.mp3");
+    }
+
+    fn recorded_yt_dlp_args(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("yt-dlp-args"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn classify_source_passes_option_like_sources_after_a_separator() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(dir.path(), r#"{"title": "x", "description": ""}"#);
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let _ = classify_source("--config-locations=/tmp/evil.conf");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+
+        let args = recorded_yt_dlp_args(dir.path());
+        let n = args.len();
+        assert_eq!(args[n - 2], "--", "missing -- separator: {args:?}");
+        assert_eq!(args[n - 1], "--config-locations=/tmp/evil.conf");
+    }
+
+    #[test]
+    fn classify_source_limits_yt_dlp_to_one_video_with_a_network_timeout() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(dir.path(), r#"{"title": "x", "description": ""}"#);
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let _ = classify_source("https://www.youtube.com/watch?v=abc&list=PLxyz");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+
+        let args = recorded_yt_dlp_args(dir.path());
+        let separator = args.iter().position(|a| a == "--").unwrap();
+        let options = &args[..separator];
+        assert!(options.contains(&"--no-playlist".to_string()), "{args:?}");
+        let timeout = options.iter().position(|a| a == "--socket-timeout").expect("no --socket-timeout");
+        assert_eq!(options[timeout + 1], "10");
+    }
+
+    #[test]
+    fn classify_source_degrades_gracefully_on_multi_document_output() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(
+            dir.path(),
+            "{\"title\": \"rain one\"}\n{\"title\": \"rain two\"}\n",
+        );
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let result = classify_source("https://www.youtube.com/playlist?list=PLxyz");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert_eq!(result.unwrap(), None);
     }
 
     #[test]
