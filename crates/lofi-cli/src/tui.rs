@@ -94,9 +94,7 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
             if let Event::Key(key) = event {
                 match key.code {
                     KeyCode::Up => {
-                        if selected > 0 {
-                            selected -= 1;
-                        }
+                        selected = selected.saturating_sub(1);
                     }
                     KeyCode::Down => {
                         if selected + 1 < moods.len() {

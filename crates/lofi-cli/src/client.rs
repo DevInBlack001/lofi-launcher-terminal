@@ -172,13 +172,11 @@ mod tests {
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut writer = stream.try_clone().unwrap();
-            let reader = BufReader::new(stream);
-            for line in reader.lines() {
-                let _ = line.unwrap();
-                let resp = lofi_common::encode_response(&lofi_common::Response::Ok);
-                writer.write_all(resp.as_bytes()).unwrap();
-                break;
-            }
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let resp = lofi_common::encode_response(&lofi_common::Response::Ok);
+            writer.write_all(resp.as_bytes()).unwrap();
             let _ = server_socket_path;
         });
 
