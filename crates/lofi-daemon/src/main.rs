@@ -1,9 +1,6 @@
-mod mpv;
-mod server;
-mod state;
-
-use mpv::{MpvController, RealMpv};
-use state::DaemonState;
+use lofi_daemon::mpv::{MpvController, RealMpv};
+use lofi_daemon::server;
+use lofi_daemon::state::DaemonState;
 use std::sync::{Arc, Mutex};
 
 fn runtime_dir() -> std::path::PathBuf {

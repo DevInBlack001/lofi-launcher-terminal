@@ -213,8 +213,6 @@ impl Drop for RealMpv {
 mod tests {
     use super::*;
 
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn mpv_available() -> bool {
         std::process::Command::new("mpv").arg("--version").output().is_ok()
     }
@@ -236,7 +234,7 @@ mod tests {
 
     #[test]
     fn find_mpris_script_prefers_env_override_when_file_exists() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake_script = dir.path().join("mpris.so");
         std::fs::write(&fake_script, b"").unwrap();
@@ -247,7 +245,7 @@ mod tests {
 
     #[test]
     fn find_mpris_script_ignores_env_override_pointing_at_missing_file() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::set_var("LOFI_MPV_MPRIS_SCRIPT", "/nonexistent/mpris.so");
         let result = find_mpris_script();
         std::env::remove_var("LOFI_MPV_MPRIS_SCRIPT");
@@ -262,7 +260,7 @@ mod tests {
 
     #[test]
     fn find_mpris_script_falls_back_to_user_config_dir() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let scripts_dir = dir.path().join("mpv").join("scripts");
         std::fs::create_dir_all(&scripts_dir).unwrap();

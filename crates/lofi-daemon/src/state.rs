@@ -199,8 +199,6 @@ mod tests {
     use lofi_common::Mood;
     use std::collections::BTreeMap;
 
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[derive(Default)]
     struct FakeMpv {
         started: Vec<String>,
@@ -315,7 +313,7 @@ mod tests {
 
     #[test]
     fn add_with_explicit_mood_appends_source_and_reports_classified_mood() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
@@ -385,7 +383,7 @@ mod tests {
 
     #[test]
     fn reload_picks_up_sources_edited_on_disk() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
@@ -402,7 +400,7 @@ mod tests {
 
     #[test]
     fn reload_falls_back_to_default_config_when_file_is_missing() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
@@ -415,7 +413,7 @@ mod tests {
 
     #[test]
     fn reload_resets_to_default_mood_when_current_mood_was_removed() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
@@ -437,7 +435,7 @@ mod tests {
 
     #[test]
     fn reload_keeps_sessions_and_playback_running() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
@@ -454,7 +452,7 @@ mod tests {
 
     #[test]
     fn reload_with_malformed_config_returns_error_and_keeps_old_config() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
         let path = scratch_dir.path().join("lofi-launcher").join("config.toml");
@@ -470,7 +468,7 @@ mod tests {
 
     #[test]
     fn add_rereads_config_from_disk_and_preserves_hand_edits() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
@@ -505,7 +503,7 @@ mod tests {
 
     #[test]
     fn add_accepts_a_mood_that_only_exists_in_the_on_disk_config() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
@@ -525,7 +523,7 @@ mod tests {
 
     #[test]
     fn add_with_malformed_on_disk_config_refuses_to_overwrite_it() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
         let path = scratch_dir.path().join("lofi-launcher").join("config.toml");
@@ -545,7 +543,7 @@ mod tests {
 
     #[test]
     fn add_with_unknown_explicit_mood_returns_error() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
