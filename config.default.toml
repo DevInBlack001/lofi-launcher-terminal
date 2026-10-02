@@ -40,8 +40,8 @@ sources = []
 # substring, so a short keyword also hits inside longer words (e.g. "rain"
 # in "training", "space" in "workspace").
 [classifier]
-code-and-chill = ["code", "study", "synthwave", "productivity"]
+code-and-chill = ["code", "study", "synthwave", "retrowave", "productivity"]
 deep-focus = ["deep focus", "concentration", "flow state"]
-chill-beats = ["chill", "beats", "hip hop", "lofi hip hop"]
+chill-beats = ["chill", "beats", "hip hop", "lofi hip hop", "vaporwave"]
 rainy-day = ["rain", "storm", "thunder", "cozy"]
 ambient = ["ambient", "drone", "atmosphere", "space"]

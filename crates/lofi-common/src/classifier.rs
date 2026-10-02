@@ -6,12 +6,20 @@ use std::collections::BTreeMap;
 // losing to incidental description matches.
 const TITLE_WEIGHT: usize = 3;
 const DESCRIPTION_WEIGHT: usize = 1;
+// Bracketed genre tags like [synthwave] are explicit self-labels from the creator
+// and should outweigh generic description filler words
+const BRACKETED_TAG_BONUS: usize = 10;
 
 fn count_occurrences(haystack: &str, needle: &str) -> usize {
     if needle.is_empty() {
         return 0;
     }
     haystack.matches(needle).count()
+}
+
+fn has_bracketed_keyword(text: &str, keyword: &str) -> bool {
+    let bracketed = format!("[{}]", keyword);
+    text.contains(&bracketed)
 }
 
 pub fn classify(classifier: &BTreeMap<String, Vec<String>>, title: &str, description: &str) -> Option<String> {
@@ -24,8 +32,14 @@ pub fn classify(classifier: &BTreeMap<String, Vec<String>>, title: &str, descrip
             .iter()
             .map(|keyword| {
                 let keyword = keyword.to_lowercase();
-                count_occurrences(&title, &keyword) * TITLE_WEIGHT
-                    + count_occurrences(&description, &keyword) * DESCRIPTION_WEIGHT
+                let mut score = count_occurrences(&title, &keyword) * TITLE_WEIGHT
+                    + count_occurrences(&description, &keyword) * DESCRIPTION_WEIGHT;
+
+                if has_bracketed_keyword(&title, &keyword) {
+                    score += BRACKETED_TAG_BONUS;
+                }
+
+                score
             })
             .sum();
 
@@ -94,4 +108,35 @@ mod tests {
         );
         assert_eq!(result, Some("chill-beats".to_string()));
     }
+
+    #[test]
+    fn bracketed_genre_tag_outweighs_generic_filler_words() {
+        let mut classifier = BTreeMap::new();
+        classifier.insert(
+            "code-and-chill".to_string(),
+            vec!["code".to_string(), "synthwave".to_string()],
+        );
+        classifier.insert("chill-beats".to_string(), vec!["chill".to_string()]);
+        let result = classify(
+            &classifier,
+            "3 A.M Chill Session [synthwave]",
+            "chill beats for relaxation, perfect atmosphere for deep work",
+        );
+        assert_eq!(result, Some("code-and-chill".to_string()),
+                   "bracketed [synthwave] should outweigh three generic 'chill' occurrences");
+    }
+
+    #[test]
+    fn bracketed_tag_bonus_only_applies_to_keywords_in_brackets() {
+        let mut classifier = BTreeMap::new();
+        classifier.insert("genre-a".to_string(), vec!["test".to_string()]);
+        classifier.insert("genre-b".to_string(), vec!["other".to_string()]);
+        let result = classify(
+            &classifier,
+            "title with [test] bracketed",
+            "description mentioning test elsewhere",
+        );
+        assert_eq!(result, Some("genre-a".to_string()));
+    }
+
 }
