@@ -80,6 +80,15 @@ whichever mood's list fits, they don't get their own mood keys. A long
 source (a multi-hour YouTube mix, for example) is never downloaded or cut
 into clips; mpv just seeks to a random point in it each time it's selected.
 
+Live stream URLs (a 24/7 lofi radio on YouTube, for example) work as
+sources too, added the same way as any other URL with `lofi add`. They play
+continuously from the live edge, without the random seek, since a live
+broadcast has no fixed length to seek within. When a live stream ends
+because the broadcast goes offline, it is treated like any other source
+finishing and moves on to the next one (see below). A source that fails to
+load at all, live or not, stops playback instead of moving on, so a dead URL
+or a lost connection never turns into an endless retry loop.
+
 When a source finishes, playback moves on to the next source in the mood,
 wrapping back to the first after the last. Set `loop_playback = false` in
 `config.toml` (or run `lofi loop off`) to stop at the end of each source

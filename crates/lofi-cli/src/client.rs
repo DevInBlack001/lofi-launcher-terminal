@@ -266,6 +266,22 @@ mod tests {
     }
 
     #[test]
+    fn classify_source_handles_live_stream_metadata_without_a_duration() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(
+            dir.path(),
+            r#"{"title": "lofi rain radio 24/7", "description": "", "is_live": true, "duration": null}"#,
+        );
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("empty-config-home"));
+        let result = classify_source("https://www.youtube.com/watch?v=live");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert_eq!(result.unwrap(), Some("rainy-day".to_string()));
+    }
+
+    #[test]
     fn resolve_source_makes_existing_local_paths_absolute_and_canonical() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();

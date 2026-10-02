@@ -77,8 +77,10 @@ fn ipc_request(socket_path: &Path, payload: &serde_json::Value, read_timeout: Du
     }
 }
 
-fn query_duration(socket_path: &Path, generation: &AtomicU64, expected_generation: u64) -> Option<u64> {
-    let deadline = Instant::now() + DURATION_PROBE_BUDGET;
+// Gives up after `budget`; a source whose duration never appears (e.g. a live
+// broadcast or an internet radio stream) is then simply never seeked.
+fn query_duration(socket_path: &Path, generation: &AtomicU64, expected_generation: u64, budget: Duration) -> Option<u64> {
+    let deadline = Instant::now() + budget;
     while Instant::now() < deadline {
         // Give mpv a moment to unload the previous file first, so its duration
         // is not mistaken for the new one's.
@@ -107,7 +109,7 @@ fn seek_into_long_source(
 ) {
     let duration = match known_duration_seconds {
         Some(d) => d,
-        None => match query_duration(socket_path, generation, expected_generation) {
+        None => match query_duration(socket_path, generation, expected_generation, DURATION_PROBE_BUDGET) {
             Some(d) => d,
             None => return,
         },
@@ -118,9 +120,30 @@ fn seek_into_long_source(
     if generation.load(Ordering::SeqCst) != expected_generation {
         return;
     }
+    if !random_seek_makes_sense(socket_path) {
+        return;
+    }
     let offset = rand_offset_seconds(duration);
     let seek = serde_json::json!({ "command": ["set_property", "time-pos", offset] });
     let _ = ipc_request(socket_path, &seek, DEFAULT_IPC_TIMEOUT);
+}
+
+// A live broadcast reports the time since it started as an ever-growing
+// duration and claims to be seekable, but jumping to a random point in it
+// would land far behind the live edge. mpv's ytdl hook tags such sources.
+fn random_seek_makes_sense(socket_path: &Path) -> bool {
+    let get = |property: &str| {
+        ipc_request(
+            socket_path,
+            &serde_json::json!({ "command": ["get_property", property] }),
+            DEFAULT_IPC_TIMEOUT,
+        )
+        .ok()
+        .and_then(|reply| reply.get("data").cloned())
+    };
+    let is_live = get("metadata/by-key/ytdl_is_live").is_some_and(|v| v.as_str() == Some("true"));
+    let unseekable = get("seekable").is_some_and(|v| v.as_bool() == Some(false));
+    !is_live && !unseekable
 }
 
 fn mpv_binary() -> String {
@@ -333,9 +356,10 @@ impl Drop for RealMpv {
 mod tests {
     use super::*;
 
-    // Stands in for mpv's IPC socket: records every command and answers
-    // get_property duration only once `duration_delay` has passed since the
-    // latest loadfile, like real mpv resolving a network source.
+    // Stands in for mpv's IPC socket: records every command except property
+    // reads, answers get_property duration only once `duration_delay` has
+    // passed since the latest loadfile (like real mpv resolving a network
+    // source), and answers other reads from `properties`.
     struct FakeMpvServer {
         commands: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
         _dir: tempfile::TempDir,
@@ -344,6 +368,10 @@ mod tests {
 
     impl FakeMpvServer {
         fn start(duration_seconds: f64, duration_delay: Duration) -> Self {
+            Self::start_with_properties(duration_seconds, duration_delay, serde_json::json!({}))
+        }
+
+        fn start_with_properties(duration_seconds: f64, duration_delay: Duration, properties: serde_json::Value) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let socket_path = dir.path().join("fake-mpv.sock");
             let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
@@ -355,6 +383,7 @@ mod tests {
                     let Ok(stream) = stream else { return };
                     let commands = server_commands.clone();
                     let last_load = last_load.clone();
+                    let properties = properties.clone();
                     std::thread::spawn(move || {
                         let mut writer = stream.try_clone().unwrap();
                         // Real mpv pushes events to every client; make sure they are skipped.
@@ -368,6 +397,11 @@ mod tests {
                                     serde_json::json!({ "data": duration_seconds, "error": "success" })
                                 } else {
                                     serde_json::json!({ "error": "property unavailable" })
+                                }
+                            } else if args[0] == "get_property" {
+                                match properties.get(args[1].as_str().unwrap()) {
+                                    Some(value) => serde_json::json!({ "data": value, "error": "success" }),
+                                    None => serde_json::json!({ "error": "property unavailable" }),
                                 }
                             } else {
                                 if args[0] == "loadfile" {
@@ -519,6 +553,47 @@ mod tests {
             !recorded.iter().any(|c| is_set(c, "time-pos") || c["command"][2] == "inf"),
             "probe for the replaced source acted on the new one: {recorded:?}"
         );
+    }
+
+    // Real mpv on a YouTube live stream reports the time since the broadcast
+    // started as an ever-growing duration (72054s was observed) and seekable=true.
+    #[test]
+    fn live_stream_with_a_growing_duration_is_never_randomly_seeked() {
+        let server = FakeMpvServer::start_with_properties(
+            72054.9,
+            Duration::ZERO,
+            serde_json::json!({ "metadata/by-key/ytdl_is_live": "true", "seekable": true }),
+        );
+        let mut mpv = server.mpv();
+        mpv.start_source_with_options("https://www.youtube.com/watch?v=live", &opts(None)).unwrap();
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(!server.recorded().iter().any(|c| is_set(c, "time-pos")), "{:?}", server.recorded());
+    }
+
+    #[test]
+    fn unseekable_long_source_is_not_randomly_seeked() {
+        let server =
+            FakeMpvServer::start_with_properties(3.0 * 3600.0, Duration::ZERO, serde_json::json!({ "seekable": false }));
+        let mut mpv = server.mpv();
+        mpv.start_source_with_options("https://example.com/radio", &opts(None)).unwrap();
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(!server.recorded().iter().any(|c| is_set(c, "time-pos")));
+    }
+
+    #[test]
+    fn duration_probe_gives_up_within_its_budget_when_no_duration_ever_appears() {
+        let server = FakeMpvServer::start(3.0 * 3600.0, Duration::from_secs(3600));
+        let generation = AtomicU64::new(1);
+        let started = Instant::now();
+        assert_eq!(query_duration(&server.socket_path, &generation, 1, Duration::from_secs(1)), None);
+        assert!(started.elapsed() < Duration::from_secs(3), "probe overran its budget: {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_zero_duration_is_not_mistaken_for_a_real_one() {
+        let server = FakeMpvServer::start(0.0, Duration::ZERO);
+        let generation = AtomicU64::new(1);
+        assert_eq!(query_duration(&server.socket_path, &generation, 1, Duration::from_secs(1)), None);
     }
 
     fn mpv_available() -> bool {
