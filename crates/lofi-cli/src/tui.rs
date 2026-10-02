@@ -1,4 +1,4 @@
-use crate::client::{self, Chapter};
+use crate::client::{self, Chapter, SourceMetadata};
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
@@ -43,6 +43,8 @@ fn format_timestamp(seconds: u64) -> String {
 }
 
 const MAX_BREADCRUMB_SOURCE_CHARS: usize = 48;
+const SOURCE_VIEW_SOURCE_WIDTH: usize = 45;
+const SOURCE_VIEW_CHAPTER_WIDTH: usize = 8;
 
 fn short_source_label(source: &str) -> String {
     let label = if client::is_local_source(source) {
@@ -62,6 +64,39 @@ fn short_source_label(source: &str) -> String {
     }
 }
 
+fn truncate_text(text: &str, max_width: usize) -> String {
+    let text = client::sanitize_for_display(text);
+    if text.chars().count() > max_width {
+        let kept: String = text.chars().take(max_width.saturating_sub(3)).collect();
+        format!("{kept}...")
+    } else {
+        text
+    }
+}
+
+fn format_source_row(source: &str, metadata: Option<&SourceMetadata>) -> String {
+    let source_label = if client::is_local_source(source) {
+        Path::new(source)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| source.to_string())
+    } else {
+        source.to_string()
+    };
+    let source_part = truncate_text(&source_label, SOURCE_VIEW_SOURCE_WIDTH);
+
+    let (chapter_part, title_part) = match metadata {
+        Some(meta) => {
+            let chapters = format!("{}", meta.chapter_count);
+            let title = truncate_text(&meta.title, 40);
+            (chapters, title)
+        }
+        None => ("...".to_string(), "...".to_string()),
+    };
+
+    format!("{:<width$} {:>cw$}  {}", source_part, chapter_part, title_part, width = SOURCE_VIEW_SOURCE_WIDTH, cw = SOURCE_VIEW_CHAPTER_WIDTH)
+}
+
 enum Level {
     Moods,
     Sources { mood: String, sources: Vec<String> },
@@ -75,6 +110,8 @@ enum Action {
     None,
     ListSources(String),
     FetchChapters(String),
+    #[allow(dead_code)]
+    FetchSourceMetadata(String),
     Play { mood: String, index: usize, seek_seconds: Option<u64> },
     SwitchMood(String),
     RemoveSource { mood: String, source: String },
@@ -87,7 +124,9 @@ struct Browser {
     source_selected: usize,
     chapter_selected: usize,
     chapter_cache: HashMap<String, Vec<Chapter>>,
+    metadata_cache: HashMap<String, SourceMetadata>,
     loading: HashSet<String>,
+    metadata_loading: HashSet<String>,
     // The URL source Enter was pressed on while its chapters were still
     // loading; acted on when they arrive, unless the user has moved since.
     awaiting: Option<(String, usize, String)>,
@@ -104,7 +143,9 @@ impl Browser {
             source_selected: 0,
             chapter_selected: 0,
             chapter_cache: HashMap::new(),
+            metadata_cache: HashMap::new(),
             loading: HashSet::new(),
+            metadata_loading: HashSet::new(),
             awaiting: None,
             delete_pending: None,
         }
@@ -161,6 +202,18 @@ impl Browser {
         self.delete_pending = None;
         self.source_selected = 0;
         self.level = Level::Sources { mood, sources };
+    }
+
+    fn should_prefetch_metadata(&self, source: &str) -> bool {
+        !client::is_local_source(source) && !self.metadata_cache.contains_key(source) && !self.metadata_loading.contains(source)
+    }
+
+    fn sources_to_prefetch(&self) -> Vec<String> {
+        if let Level::Sources { sources, .. } = &self.level {
+            sources.iter().filter(|s| self.should_prefetch_metadata(s)).cloned().collect()
+        } else {
+            Vec::new()
+        }
     }
 
     fn show_chapters(&mut self, mood: String, sources: Vec<String>, index: usize, chapters: Vec<Chapter>) {
@@ -249,6 +302,11 @@ impl Browser {
         Action::None
     }
 
+    fn metadata_arrived(&mut self, source: &str, metadata: SourceMetadata) {
+        self.metadata_loading.remove(source);
+        self.metadata_cache.insert(source.to_string(), metadata);
+    }
+
     fn awaiting_source(&self) -> Option<&str> {
         self.awaiting.as_ref().map(|(_, _, source)| source.as_str())
     }
@@ -311,18 +369,8 @@ impl Browser {
             Level::Sources { sources, .. } => sources
                 .iter()
                 .map(|source| {
-                    if client::is_local_source(source) {
-                        return format!("[file] {}", short_source_label(source));
-                    }
-                    let label = client::sanitize_for_display(source);
-                    if self.loading.contains(source) {
-                        format!("{label}  (loading chapters...)")
-                    } else {
-                        match self.chapter_cache.get(source) {
-                            Some(chapters) if !chapters.is_empty() => format!("{label}  ({} chapters)", chapters.len()),
-                            _ => label,
-                        }
-                    }
+                    let metadata = self.metadata_cache.get(source);
+                    format_source_row(source, metadata)
                 })
                 .collect(),
             Level::Chapters { chapters, .. } => std::iter::once("(whole source from the start)".to_string())
@@ -343,10 +391,18 @@ impl Browser {
 }
 
 type ChapterResult = (String, Result<Vec<Chapter>, String>);
+type MetadataResult = (String, Result<SourceMetadata, String>);
 
 fn spawn_chapter_fetch(source: String, results: mpsc::Sender<ChapterResult>) {
     std::thread::spawn(move || {
         let result = client::fetch_chapters(&source).map_err(|e| e.to_string());
+        let _ = results.send((source, result));
+    });
+}
+
+fn spawn_metadata_fetch(source: String, results: mpsc::Sender<MetadataResult>) {
+    std::thread::spawn(move || {
+        let result = client::fetch_source_metadata(&source).map_err(|e| e.to_string());
         let _ = results.send((source, result));
     });
 }
@@ -357,6 +413,7 @@ fn perform(
     socket: &Path,
     browser: &mut Browser,
     chapter_results: &mpsc::Sender<ChapterResult>,
+    metadata_results: &mpsc::Sender<MetadataResult>,
 ) -> Option<String> {
     let command = match action {
         Action::None => return None,
@@ -364,10 +421,21 @@ fn perform(
             spawn_chapter_fetch(source, chapter_results.clone());
             return None;
         }
+        Action::FetchSourceMetadata(source) => {
+            if browser.should_prefetch_metadata(&source) {
+                browser.metadata_loading.insert(source.clone());
+                spawn_metadata_fetch(source, metadata_results.clone());
+            }
+            return None;
+        }
         Action::ListSources(mood) => {
             return match client::send_command(socket, &lofi_common::Command::Sources(mood.clone())) {
                 Ok(lofi_common::Response::Sources(sources)) => {
                     browser.show_sources(mood, sources);
+                    for source in browser.sources_to_prefetch() {
+                        browser.metadata_loading.insert(source.clone());
+                        spawn_metadata_fetch(source, metadata_results.clone());
+                    }
                     None
                 }
                 other => action_error(other).or_else(|| Some("unexpected response listing sources".to_string())),
@@ -393,6 +461,7 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
     let mut notice: Option<String> = None;
     let mut browser = Browser::new(moods);
     let (chapter_results_tx, chapter_results) = mpsc::channel::<ChapterResult>();
+    let (metadata_results_tx, metadata_results) = mpsc::channel::<MetadataResult>();
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -407,9 +476,20 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
             };
             let action = browser.chapters_arrived(&source, chapters);
             if matches!(action, Action::Play { .. }) {
-                last_error = perform(action, &socket, &mut browser, &chapter_results_tx);
+                last_error = perform(action, &socket, &mut browser, &chapter_results_tx, &metadata_results_tx);
                 notice = fetch_error.map(|e| format!("no chapter list ({e}), playing from the start"));
                 refresh_status(&socket, &mut view);
+            }
+        }
+
+        while let Ok((source, fetched)) = metadata_results.try_recv() {
+            match fetched {
+                Ok(metadata) => {
+                    browser.metadata_arrived(&source, metadata);
+                }
+                Err(_) => {
+                    browser.metadata_loading.remove(&source);
+                }
             }
         }
 
@@ -500,13 +580,13 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                     KeyCode::Enter => {
                         if let Some((mood, source)) = browser.confirm_delete_if_pending() {
                             let action = Action::RemoveSource { mood, source };
-                            last_error = perform(action, &socket, &mut browser, &chapter_results_tx);
+                            last_error = perform(action, &socket, &mut browser, &chapter_results_tx, &metadata_results_tx);
                             refresh_status(&socket, &mut view);
                             None
                         } else {
                             browser.cancel_delete();
                             let action = browser.enter();
-                            last_error = perform(action, &socket, &mut browser, &chapter_results_tx);
+                            last_error = perform(action, &socket, &mut browser, &chapter_results_tx, &metadata_results_tx);
                             refresh_status(&socket, &mut view);
                             None
                         }
@@ -514,7 +594,7 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                     KeyCode::Char(' ') => {
                         browser.cancel_delete();
                         let action = browser.play_from_start();
-                        last_error = perform(action, &socket, &mut browser, &chapter_results_tx);
+                        last_error = perform(action, &socket, &mut browser, &chapter_results_tx, &metadata_results_tx);
                         refresh_status(&socket, &mut view);
                         None
                     }
@@ -537,6 +617,10 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                 if let Some(command) = daemon_command {
                     last_error = action_error(client::send_command(&socket, &command));
                     refresh_status(&socket, &mut view);
+                    if matches!(command, lofi_common::Command::Mood(_)) {
+                        browser.metadata_cache.clear();
+                        browser.metadata_loading.clear();
+                    }
                 }
             }
         }
@@ -599,7 +683,9 @@ mod tests {
         browser.down();
         assert_eq!(browser.enter(), Action::FetchChapters(URL.to_string()));
         assert_eq!(browser.enter(), Action::None, "a second Enter while loading must not refetch");
-        assert!(browser.items()[1].contains("loading chapters"));
+        let items = browser.items();
+        assert_eq!(items.len(), 2);
+        assert!(items[1].contains("..."), "item should show placeholder while metadata not loaded");
 
         assert_eq!(browser.chapters_arrived(URL, chapters()), Action::None);
         assert_eq!(browser.breadcrumb(), "moods > ambient > https://www.youtube.com/watch?v=mix > chapters");
@@ -718,5 +804,70 @@ mod tests {
         let result = browser.confirm_delete_if_pending();
         assert_eq!(result, None);
         assert_eq!(browser.delete_pending, None);
+    }
+
+    #[test]
+    fn source_rows_show_three_columns_source_chapters_title() {
+        let mut browser = browser_in_ambient();
+        let metadata = SourceMetadata { title: "lofi hip hop mix".to_string(), chapter_count: 3 };
+        browser.metadata_cache.insert(URL.to_string(), metadata);
+        let items = browser.items();
+        let row = &items[1];
+        assert!(row.contains("https://www.youtube.com/watch?v=mix"), "source should appear: {row}");
+        assert!(row.contains("3"), "chapter count should appear: {row}");
+        assert!(row.contains("lofi hip hop mix"), "title should appear: {row}");
+    }
+
+    #[test]
+    fn source_rows_show_placeholders_when_metadata_not_loaded() {
+        let browser = browser_in_ambient();
+        let items = browser.items();
+        let row = &items[1];
+        assert!(row.contains("https://www.youtube.com/watch?v=mix"), "source should appear: {row}");
+        assert!(row.contains("..."), "placeholders should appear for missing metadata: {row}");
+    }
+
+    #[test]
+    fn local_files_show_filename_title_and_zero_chapters() {
+        let mut browser = browser_in_ambient();
+        let metadata = SourceMetadata { title: "mix.flac".to_string(), chapter_count: 0 };
+        browser.metadata_cache.insert(LOCAL.to_string(), metadata);
+        let items = browser.items();
+        let row = &items[0];
+        assert!(row.contains("mix.flac"), "local file title should appear: {row}");
+        assert!(row.contains("0"), "local file chapter count should be 0: {row}");
+    }
+
+    #[test]
+    fn metadata_cache_returns_same_value_on_second_lookup() {
+        let mut browser = browser_in_ambient();
+        let metadata = SourceMetadata { title: "test video".to_string(), chapter_count: 5 };
+        browser.metadata_arrived(URL, metadata.clone());
+        assert_eq!(browser.metadata_cache.get(URL), Some(&metadata));
+        assert!(!browser.metadata_loading.contains(URL), "should not still be loading");
+    }
+
+    #[test]
+    fn truncate_text_clips_long_strings() {
+        let long = "x".repeat(50);
+        let short = truncate_text(&long, 10);
+        assert_eq!(short.chars().count(), 10);
+        assert!(short.ends_with("..."));
+    }
+
+    #[test]
+    fn format_source_row_without_metadata_shows_placeholders() {
+        let row = format_source_row(URL, None);
+        assert!(row.contains("https://www.youtube.com/watch?v=mix"), "source should appear");
+        assert!(row.contains("..."), "placeholders should appear: {row}");
+    }
+
+    #[test]
+    fn format_source_row_with_metadata_shows_all_columns() {
+        let metadata = SourceMetadata { title: "lofi hip hop mix".to_string(), chapter_count: 3 };
+        let row = format_source_row(URL, Some(&metadata));
+        assert!(row.contains("https://www.youtube.com/watch?v=mix"), "source should appear: {row}");
+        assert!(row.contains("3"), "chapter count should appear: {row}");
+        assert!(row.contains("lofi hip hop mix"), "title should appear: {row}");
     }
 }

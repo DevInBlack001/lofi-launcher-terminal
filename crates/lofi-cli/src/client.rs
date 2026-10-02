@@ -511,6 +511,26 @@ pub fn fetch_chapters(source: &str) -> anyhow::Result<Vec<Chapter>> {
     Ok(parse_chapters(&json))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceMetadata {
+    pub title: String,
+    pub chapter_count: usize,
+}
+
+pub fn fetch_source_metadata(source: &str) -> anyhow::Result<SourceMetadata> {
+    if is_local_source(source) {
+        let title = std::path::Path::new(source)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| source.to_string());
+        return Ok(SourceMetadata { title, chapter_count: 0 });
+    }
+    let json = fetch_yt_dlp_metadata(source).map_err(|message| anyhow::anyhow!(message))?;
+    let title = json.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let chapters = parse_chapters(&json);
+    Ok(SourceMetadata { title, chapter_count: chapters.len() })
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -844,6 +864,65 @@ mod tests {
         assert!(is_local_source("/music/deleted-since.flac"));
         assert!(!is_local_source("https://www.youtube.com/watch?v=abc"));
         assert!(!is_local_source("ytdl://abc"));
+    }
+
+    #[test]
+    fn fetch_source_metadata_returns_filename_and_zero_chapters_for_local_sources() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(dir.path(), SAMPLE_CHAPTERS_JSON);
+        let local = dir.path().join("mix.flac");
+        std::fs::write(&local, b"").unwrap();
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let result = fetch_source_metadata(local.to_str().unwrap());
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert!(result.is_ok());
+        let metadata = result.unwrap();
+        assert_eq!(metadata.title, "mix.flac");
+        assert_eq!(metadata.chapter_count, 0);
+        assert!(!dir.path().join("yt-dlp-args").exists(), "yt-dlp was invoked for a local source");
+    }
+
+    #[test]
+    fn fetch_source_metadata_never_runs_yt_dlp_for_deleted_local_paths() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(dir.path(), SAMPLE_CHAPTERS_JSON);
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let result = fetch_source_metadata("/music/deleted-file.mp3");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert!(result.is_ok());
+        let metadata = result.unwrap();
+        assert_eq!(metadata.chapter_count, 0);
+        assert!(!dir.path().join("yt-dlp-args").exists(), "yt-dlp was invoked for a deleted path");
+    }
+
+    #[test]
+    fn fetch_source_metadata_fetches_title_and_chapter_count_for_urls() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(dir.path(), SAMPLE_CHAPTERS_JSON);
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let result = fetch_source_metadata("https://www.youtube.com/watch?v=abc");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert!(result.is_ok());
+        let metadata = result.unwrap();
+        assert_eq!(metadata.title, "lofi hip hop mix");
+        assert_eq!(metadata.chapter_count, 3);
+    }
+
+    #[test]
+    fn fetch_source_metadata_handles_url_without_chapters() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(dir.path(), r#"{"title": "rain mix", "is_live": false}"#);
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let result = fetch_source_metadata("https://www.youtube.com/watch?v=abc");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert!(result.is_ok());
+        let metadata = result.unwrap();
+        assert_eq!(metadata.title, "rain mix");
+        assert_eq!(metadata.chapter_count, 0);
     }
 
     #[test]
