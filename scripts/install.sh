@@ -17,8 +17,11 @@ echo "Building release binaries..."
 (cd "$REPO_DIR" && cargo build --release)
 
 mkdir -p "$BIN_DIR"
-cp "$REPO_DIR/target/release/lofi" "$BIN_DIR/lofi"
-cp "$REPO_DIR/target/release/lofi-daemon" "$BIN_DIR/lofi-daemon"
+# install unlinks the destination before writing, so replacing a binary that
+# is currently running works; cp writes into the running inode and fails
+# with "Text file busy".
+install -m755 "$REPO_DIR/target/release/lofi" "$BIN_DIR/lofi"
+install -m755 "$REPO_DIR/target/release/lofi-daemon" "$BIN_DIR/lofi-daemon"
 echo "Installed binaries to $BIN_DIR"
 
 # Only seed a default config if the user doesn't already have one, so a

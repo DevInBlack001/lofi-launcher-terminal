@@ -20,6 +20,23 @@ echo "Rebuilding release binaries..."
 # Overwrite the binaries only. Config and the shell-rc snippet are never
 # touched here, so an update never loses a user's moods or sources.
 mkdir -p "$BIN_DIR"
-cp "$REPO_DIR/target/release/lofi" "$BIN_DIR/lofi"
-cp "$REPO_DIR/target/release/lofi-daemon" "$BIN_DIR/lofi-daemon"
+# install unlinks the destination before writing, so replacing a binary that
+# is currently running works; cp writes into the running inode and fails
+# with "Text file busy".
+install -m755 "$REPO_DIR/target/release/lofi" "$BIN_DIR/lofi"
+install -m755 "$REPO_DIR/target/release/lofi-daemon" "$BIN_DIR/lofi-daemon"
 echo "Updated binaries in $BIN_DIR. Existing config and shell integration are preserved."
+
+# A running daemon keeps executing the old binary until it exits. Stop it so
+# the next lofi command auto-spawns the new one. -x matches the exact process
+# name only, same as uninstall.sh.
+if pkill -u "$(id -u)" -x lofi-daemon 2>/dev/null; then
+    # Same safety net as uninstall.sh for an old daemon build that lacked a
+    # SIGTERM handler and would orphan its mpv.
+    sleep 1
+    pkill -u "$(id -u)" -f -- "--input-ipc-server=.*lofi-mpv\.sock" 2>/dev/null || true
+    echo "Restarted lofi-daemon to pick up the update: the old daemon was stopped, so playback"
+    echo "has stopped. The new daemon starts on the next lofi command and playback resumes when"
+    echo "a new terminal opens. Terminals that were already open are not counted by the new"
+    echo "daemon, so playback may stop while some of them are still open."
+fi
