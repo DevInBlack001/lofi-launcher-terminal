@@ -17,7 +17,7 @@ optdepends=(
 )
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/DevInBlack001/lofi-launcher-terminal/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('3d69be29b13653bac535a8d0e1a8142f0229a0cdfd3eadae0aff5b289fff92bf')
 
 prepare() {
     cd "$pkgname-$pkgver"
