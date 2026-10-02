@@ -11,14 +11,22 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/DevInBlack001/lofi-launcher-terminal"
 license=('MIT')
 depends=('mpv')
-optdepends=('mpv-mpris: expose now-playing track info over MPRIS for widgets like quickshell or playerctl')
+optdepends=(
+    'mpv-mpris: expose now-playing track info over MPRIS for widgets like quickshell or playerctl'
+    'yt-dlp: required for lofi add to classify a URL source and for mpv to stream URL sources at all'
+)
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/DevInBlack001/lofi-launcher-terminal/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
+prepare() {
+    cd "$pkgname-$pkgver"
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
 build() {
     cd "$pkgname-$pkgver"
-    cargo build --release --locked
+    cargo build --release --frozen
 }
 
 package() {
@@ -27,4 +35,5 @@ package() {
     install -Dm755 target/release/lofi-daemon "$pkgdir/usr/bin/lofi-daemon"
     install -Dm644 config.default.toml "$pkgdir/usr/share/lofi-launcher-terminal/config.default.toml"
     install -Dm644 scripts/lofi-launcher.sh.in "$pkgdir/usr/share/lofi-launcher-terminal/lofi-launcher.sh.in"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
