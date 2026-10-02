@@ -73,6 +73,11 @@ fn find_mpris_script() -> Option<String> {
 
 impl RealMpv {
     pub fn spawn(socket_path: PathBuf) -> anyhow::Result<Self> {
+        // A leftover socket from a dead mpv would make the readiness check below
+        // pass before the new mpv has bound anything.
+        if std::fs::symlink_metadata(&socket_path).is_ok() {
+            std::fs::remove_file(&socket_path)?;
+        }
         let ipc_arg = format!("--input-ipc-server={}", socket_path.display());
         let mut command = Command::new(mpv_binary());
         command.arg("--idle").arg("--no-video").arg(ipc_arg);
@@ -89,16 +94,24 @@ impl RealMpv {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
+        // Constructed before the wait so an early return still kills mpv via Drop.
+        let mut mpv = Self { socket_path, child };
 
         let deadline = Instant::now() + Duration::from_secs(3);
-        while !socket_path.exists() {
+        loop {
+            if UnixStream::connect(&mpv.socket_path).is_ok() {
+                break;
+            }
+            if let Some(status) = mpv.child.try_wait()? {
+                anyhow::bail!("mpv exited during startup ({status})");
+            }
             if Instant::now() > deadline {
-                anyhow::bail!("mpv did not create its IPC socket within 3 seconds");
+                anyhow::bail!("mpv did not accept IPC connections within 3 seconds");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        Ok(Self { socket_path, child })
+        Ok(mpv)
     }
 
     fn send(&self, payload: serde_json::Value) -> anyhow::Result<serde_json::Value> {
@@ -190,8 +203,23 @@ impl MpvController for RealMpv {
         None
     }
 
+    // Callers exit the process right after this, which skips Drop, so mpv must
+    // be confirmed gone here. A quit sent while mpv is still starting up can be
+    // lost, which was observed to orphan mpv; fall back to killing it.
     fn quit(&mut self) -> anyhow::Result<()> {
-        self.send(serde_json::json!({ "command": ["quit"] }))?;
+        let quit_result = self.send_with_timeout(
+            serde_json::json!({ "command": ["quit"] }),
+            Duration::from_millis(500),
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if self.child.try_wait()?.is_some() {
+                return quit_result.map(|_| ());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.child.kill()?;
+        self.child.wait()?;
         Ok(())
     }
 }
@@ -206,6 +234,7 @@ fn rand_offset_seconds(duration_seconds: u64) -> u64 {
 impl Drop for RealMpv {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -230,6 +259,24 @@ mod tests {
         mpv.pause().unwrap();
         mpv.resume().unwrap();
         mpv.stop().unwrap();
+    }
+
+    #[test]
+    fn spawn_replaces_a_stale_socket_file_and_waits_for_a_live_one() {
+        if !mpv_available() {
+            eprintln!("skipping: mpv not installed in this environment");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("mpv-stale.sock");
+        // A bound-then-dropped listener leaves a socket file nobody accepts on.
+        drop(std::os::unix::net::UnixListener::bind(&socket_path).unwrap());
+        assert!(UnixStream::connect(&socket_path).is_err());
+
+        let mut mpv = RealMpv::spawn(socket_path.clone()).unwrap();
+        assert!(UnixStream::connect(&socket_path).is_ok());
+        mpv.quit().unwrap();
+        assert!(mpv.child.try_wait().unwrap().is_some(), "quit must leave mpv exited");
     }
 
     #[test]

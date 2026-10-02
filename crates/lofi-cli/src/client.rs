@@ -31,12 +31,12 @@ fn daemon_binary() -> std::path::PathBuf {
 }
 
 pub fn ensure_daemon_running(socket_path: &Path) -> anyhow::Result<()> {
-    if socket_path.exists() && UnixStream::connect(socket_path).is_ok() {
+    if UnixStream::connect(socket_path).is_ok() {
         return Ok(());
     }
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path)?;
-    }
+    // A stale socket file is left for the daemon to replace: it only does so
+    // after taking its single-instance lock, whereas deleting it here could
+    // unlink the socket of a daemon another terminal just started.
     std::process::Command::new(daemon_binary())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -44,7 +44,7 @@ pub fn ensure_daemon_running(socket_path: &Path) -> anyhow::Result<()> {
         .spawn()?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !socket_path.exists() {
+    while UnixStream::connect(socket_path).is_err() {
         if std::time::Instant::now() > deadline {
             anyhow::bail!("lofi-daemon did not start within 5 seconds");
         }
