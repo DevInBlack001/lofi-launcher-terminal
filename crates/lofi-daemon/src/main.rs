@@ -15,7 +15,6 @@ fn runtime_dir() -> std::path::PathBuf {
 // instance lock they race on the shared socket path and each spawns its own
 // mpv, orphaning all but the last.
 fn acquire_single_instance_lock(run_dir: &std::path::Path) -> anyhow::Result<Option<std::fs::File>> {
-    use std::os::unix::io::AsRawFd;
     let lock_path = run_dir.join("lofi-daemon.lock");
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -27,22 +26,13 @@ fn acquire_single_instance_lock(run_dir: &std::path::Path) -> anyhow::Result<Opt
         .open(&lock_path)
         .map_err(|e| anyhow::anyhow!("could not open lock file {}: {e}", lock_path.display()))?;
 
-    let fd = file.as_raw_fd();
-    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-    lock.l_type = libc::F_WRLCK as i16;
-    lock.l_whence = libc::SEEK_SET as i16;
-    lock.l_start = 0;
-    lock.l_len = 0;
-
-    let result = unsafe { libc::fcntl(fd, libc::F_SETLK, &lock) };
-    if result == 0 {
-        Ok(Some(file))
-    } else {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            Ok(None)
-        } else {
-            Err(anyhow::anyhow!("could not lock {}: {err}", lock_path.display()))
+    // std::fs::File::try_lock (stable since Rust 1.89) over a manual
+    // libc::fcntl call: same advisory-lock semantics, no unsafe FFI needed.
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(anyhow::anyhow!("could not lock {}: {e}", lock_path.display()))
         }
     }
 }
