@@ -108,7 +108,12 @@ entries are skipped and listed with the exact `lofi add <url> --mood <name>`
 command to add them one by one. Private or deleted videos are skipped, and
 so is anything already in a mood's list, so re-adding a playlist only picks
 up its new entries. A watch URL that also carries a `list=` parameter counts
-as the playlist; drop the `list=` part to add just that one video.
+as the playlist, with one exception: a link copied while a YouTube
+"Mix"/"Radio" autoplay was running (`list=RD...`) is treated as just that
+one video instead, since that list is auto-generated and usually isn't what
+copying "this video" was meant to add; a real playlist (`list=PL...` etc) is
+unaffected. Remember to quote a URL containing `&` on the command line (see
+the CLI section below), or your shell silently drops everything after it.
 
 Instead of streaming, a URL (or every entry of a playlist) can be
 downloaded once and then played from disk, offline. Downloads are
@@ -125,8 +130,9 @@ instead.
 
 The daemon reads `config.toml` once at startup, so after editing the file by
 hand run `lofi reload` (or restart the daemon) for the changes to take
-effect. `lofi add` always re-reads the file before appending, so it never
-overwrites hand edits, though it does rewrite the file without its comments.
+effect. `lofi add` and `lofi remove` always re-read the file before editing
+it, and edit it in place rather than rewriting it from scratch, so they
+never overwrite hand edits and the file's comments survive.
 
 ## CLI
 
@@ -143,8 +149,22 @@ lofi add <url>          # classify a URL into a mood and add it (a playlist adds
 lofi add <url-or-path> --mood ambient  # add it to a specific mood directly
 lofi add <url> --download     # download the audio and add the local file, without asking
 lofi add <url> --no-download  # stream it, without asking
+lofi remove <mood> <source>   # remove a source from a mood (local files are not deleted from disk)
 lofi tui                # interactive browser: moods, their sources, and chapters
 ```
+
+YouTube URLs almost always contain `&` (separating query parameters, as in a
+video that's also part of a playlist). Quote the URL when passing it on the
+command line, or your shell will treat `&` as "run this in the background"
+and silently cut off everything after it:
+
+```sh
+lofi add "https://www.youtube.com/watch?v=abc123&list=PLsomePlaylistId"
+```
+
+An unquoted URL isn't truncated by `lofi`, it never reaches `lofi` at all:
+the shell splits the command at the unquoted `&` before `lofi` ever runs, so
+there's nothing the program itself can recover or detect.
 
 In `lofi tui`, Enter on a mood lists its sources (Space plays the whole mood
 right away). Enter on a local file plays it. Enter on a URL looks up its
@@ -153,7 +173,9 @@ has any, lists them so Enter can jump straight to one; a URL without chapters
 just plays from the start. Space on a source plays it from the start without
 looking anything up, and Esc or Backspace goes back up a level. Local files
 are never looked up, so browsing an offline mood stays offline. `l` toggles
-loop and `a` toggles audio quality.
+loop and `a` toggles audio quality. `d` on a source arms removal; pressing
+it again confirms and removes that source from its mood (local files are
+not deleted from disk), moving to a different source first cancels it.
 
 With neither `--download` nor `--no-download`, `lofi add <url>` asks
 `Download this locally instead of streaming? [y/N]` (once for a whole
