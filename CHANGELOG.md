@@ -10,9 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `lofi remove <mood> <source>` and a `d` key in the TUI's source browser
-  remove a source from a mood's list (pressing `d` twice confirms; moving
-  to a different source first cancels it). Local files are only removed
+  remove a source from a mood's list (`d` arms it, Enter confirms, Esc or
+  moving to a different source cancels it). Local files are only removed
   from the config, never deleted from disk.
+
+### Fixed
+
+- A bare `Enter` press on a source that had never been armed with `d`
+  silently armed it for deletion anyway, so a second ordinary `Enter`
+  press (normal browsing, not a deliberate confirm) could delete it
+  instead of playing it. `Enter` no longer has any effect on a pending
+  deletion unless `d` armed it first.
 
 ## [0.2.0] - 2026-10-02
 
