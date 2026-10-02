@@ -26,7 +26,9 @@ an online tool: `lofi add` fetches a URL's metadata over the network to
 classify it, and playback of a URL source streams over the network through
 mpv's ytdl hook. Point a mood's `sources` at local `.mp3`/`.flac`/etc. files
 instead, and that mood plays entirely offline, no network access at all for
-those sources. Mixing local and URL sources within the same mood is fine.
+those sources. `lofi add --download` turns a URL into such a local file
+once, so it plays offline from then on. Mixing local and URL sources within
+the same mood is fine.
 
 URL sources only ever stream audio: mpv is told to pick an audio-only
 stream, so no video data is downloaded just to be discarded. `audio_quality`
@@ -83,8 +85,9 @@ of the five built-in moods (`code-and-chill`, `deep-focus`, `chill-beats`,
 file/directory path or any URL mpv's built-in ytdl hook can resolve.
 Synthwave, retrowave, and vaporwave are genre flavors: mix them into
 whichever mood's list fits, they don't get their own mood keys. A long
-source (a multi-hour YouTube mix, for example) is never downloaded or cut
-into clips; mpv just seeks to a random point in it each time it's selected.
+source (a multi-hour YouTube mix, for example) is never cut into clips,
+and is only downloaded if you ask `lofi add` to (see below); mpv just seeks
+to a random point in it each time it's selected.
 
 Live stream URLs (a 24/7 lofi radio on YouTube, for example) work as
 sources too, added the same way as any other URL with `lofi add`. They play
@@ -94,6 +97,24 @@ because the broadcast goes offline, it is treated like any other source
 finishing and moves on to the next one (see below). A source that fails to
 load at all, live or not, stops playback instead of moving on, so a dead URL
 or a lost connection never turns into an endless retry loop.
+
+A playlist URL adds every video in it, each classified into a mood on its
+own title, so one playlist can spread across several moods; a summary at
+the end shows how many entries went to each. With `--mood`, that mood is
+only used for entries whose title matches no mood; without it, those
+entries are skipped and listed with the exact `lofi add <url> --mood <name>`
+command to add them one by one. Private or deleted videos are skipped, and
+so is anything already in a mood's list, so re-adding a playlist only picks
+up its new entries. A watch URL that also carries a `list=` parameter counts
+as the playlist; drop the `list=` part to add just that one video.
+
+Instead of streaming, a URL (or every entry of a playlist) can be
+downloaded once and then played from disk, offline. Downloads are
+audio-only, at the current `audio_quality`, and are stored per mood in
+`$XDG_DATA_HOME/lofi-launcher/<mood>/` (`~/.local/share/lofi-launcher/<mood>/`
+when `XDG_DATA_HOME` is unset). The mood's list then holds the downloaded
+file's path, not the URL. Live streams have no end to download, so they are
+always added as streaming sources.
 
 When a source finishes, playback moves on to the next source in the mood,
 wrapping back to the first after the last. Set `loop_playback = false` in
@@ -116,8 +137,10 @@ lofi moods              # list configured mood names
 lofi reload             # re-read config.toml after editing it by hand
 lofi loop on / lofi loop off  # auto-advance to the next source when one finishes (default on)
 lofi quality min / lofi quality max  # audio stream quality for URL sources (default min)
-lofi add <url>          # classify a URL into a mood and add it
+lofi add <url>          # classify a URL into a mood and add it (a playlist adds every entry)
 lofi add <url-or-path> --mood ambient  # add it to a specific mood directly
+lofi add <url> --download     # download the audio and add the local file, without asking
+lofi add <url> --no-download  # stream it, without asking
 lofi tui                # interactive browser: moods, their sources, and chapters
 ```
 
@@ -130,6 +153,12 @@ looking anything up, and Esc or Backspace goes back up a level. Local files
 are never looked up, so browsing an offline mood stays offline. `l` toggles
 loop and `a` toggles audio quality.
 
+With neither `--download` nor `--no-download`, `lofi add <url>` asks
+`Download this locally instead of streaming? [y/N]` (once for a whole
+playlist); Enter or anything but `y`/`yes` streams. When stdin is not a
+terminal (a script or pipe) it never asks and streams, so pass `--download`
+to download from a script. Both flags are ignored for local paths.
+
 Classification works from a URL's title and description, so `lofi add` on a
 local file path always needs `--mood`. Local paths are stored as absolute
 paths, so relative paths like `./mix.mp3` work from any directory.
@@ -141,7 +170,7 @@ lofi-daemon is already running" and exits.
 
 ## Requirements
 
-Linux, `mpv` installed and on `PATH` (or pointed to via `LOFI_MPV_BIN`). `yt-dlp` is needed for `lofi add` to classify a URL source and for mpv to stream URL sources at all; local file sources need neither.
+Linux, `mpv` installed and on `PATH` (or pointed to via `LOFI_MPV_BIN`). `yt-dlp` is needed for `lofi add` to classify, expand playlists, or download a URL source and for mpv to stream URL sources at all; local file sources need neither.
 
 ## Now-playing widgets (quickshell, playerctl, waybar)
 
