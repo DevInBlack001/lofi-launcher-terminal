@@ -102,7 +102,7 @@ overwrites hand edits, though it does rewrite the file without its comments.
 ## CLI
 
 ```sh
-lofi status            # show current mood, playing/paused/stopped, current source
+lofi status            # show current mood, playing/paused/stopped, current source, loop, quality
 lofi mood deep-focus    # switch mood
 lofi next               # skip to the next source in the current mood
 lofi pause / lofi resume

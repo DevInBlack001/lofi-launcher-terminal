@@ -25,7 +25,7 @@ enum Cmd {
     Pause,
     /// Resume playback without ending the session
     Resume,
-    /// Show the current mood, playing/paused state, and current source
+    /// Show the current mood, playing/paused state, current source, loop setting, and audio quality
     Status,
     /// List the configured mood names
     Moods,
@@ -33,7 +33,7 @@ enum Cmd {
     Reload,
     /// Turn auto-advance on or off: when on, a finished source moves on to the next one in the mood
     Loop { state: OnOff },
-    /// Pick audio-only stream quality for URL sources (min saves bandwidth); applies from the next source
+    /// Pick stream quality for URL sources (audio-only when available, min saves bandwidth); applies from the next source
     Quality { level: QualityLevel },
     /// Open an interactive browser for moods, their sources, and chapters of URL sources
     Tui,
