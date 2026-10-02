@@ -7,6 +7,8 @@ or TTY session is open on the machine.
 
 ![Interactive mood picker](docs/screenshots/tui.png)
 
+![Browsing a source's chapters](docs/screenshots/tui-chapters.png)
+
 ![lofi help](docs/screenshots/cli-help.png)
 
 ## How it works
