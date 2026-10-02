@@ -295,6 +295,140 @@ pub fn fetch_video_info(source: &str) -> Option<VideoInfo> {
     }
 }
 
+// yt-dlp goes quiet whenever --print is used, and --progress (needed to get
+// progress back) writes to stdout, the same stream the saved path is printed
+// on. The marker tells the two apart.
+const SAVED_PATH_MARKER: &str = "LOFI-SAVED:";
+const MAX_DOWNLOAD_LINE_BYTES: u64 = 64 * 1024;
+const MAX_SAVED_PATHS: usize = 16;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DownloadLine<'a> {
+    Saved(&'a str),
+    Progress(&'a str),
+    Other(&'a str),
+}
+
+pub fn classify_download_line(line: &str) -> DownloadLine<'_> {
+    if let Some(path) = line.strip_prefix(SAVED_PATH_MARKER) {
+        DownloadLine::Saved(path)
+    } else if line.starts_with("[download]") {
+        DownloadLine::Progress(line)
+    } else {
+        DownloadLine::Other(line)
+    }
+}
+
+// The printed path is trusted only as far as being a regular file directly
+// inside the directory yt-dlp was told to save into.
+pub fn validate_saved_path(printed: &str, canonical_dir: &Path) -> Option<String> {
+    let path = Path::new(printed);
+    if !path.is_absolute() {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    let parent = std::fs::canonicalize(path.parent()?).ok()?;
+    if parent != canonical_dir {
+        return None;
+    }
+    parent.join(path.file_name()?).into_os_string().into_string().ok()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DownloadOutcome {
+    pub saved: Vec<String>,
+    pub exited_ok: bool,
+}
+
+struct ProgressLine {
+    enabled: bool,
+    width: usize,
+}
+
+impl ProgressLine {
+    fn show(&mut self, text: &str) {
+        if self.enabled {
+            let width = self.width;
+            eprint!("\r{text:<width$}");
+            self.width = text.chars().count();
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.width > 0 {
+            eprintln!();
+            self.width = 0;
+        }
+    }
+}
+
+// Callers must have ruled out local sources first: this always runs yt-dlp.
+pub fn download_audio(
+    source: &str,
+    dest_dir: &Path,
+    filename_template: &str,
+    format: &str,
+) -> anyhow::Result<DownloadOutcome> {
+    let canonical_dir = std::fs::canonicalize(dest_dir)
+        .map_err(|e| anyhow::anyhow!("could not use download directory {}: {e}", dest_dir.display()))?;
+    let mut child = std::process::Command::new(yt_dlp_binary())
+        .arg("-f")
+        .arg(format)
+        .args(["--restrict-filenames", "--no-warnings", "--no-playlist", "--progress", "--newline"])
+        .arg("--print")
+        .arg(format!("after_move:{SAVED_PATH_MARKER}%(filepath)s"))
+        .args(["--socket-timeout", "10"])
+        // -P rather than a directory inside -o, so a "%" in the path is not
+        // read as a template field.
+        .arg("-P")
+        .arg(&canonical_dir)
+        .arg("-o")
+        .arg(filename_template)
+        .arg("--")
+        .arg(source)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("could not run yt-dlp to download '{source}': {e}"))?;
+
+    use std::io::IsTerminal;
+    let mut progress = ProgressLine { enabled: std::io::stderr().is_terminal(), width: 0 };
+    let mut saved = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut buf = Vec::new();
+            match (&mut reader).take(MAX_DOWNLOAD_LINE_BYTES).read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = String::from_utf8_lossy(&buf);
+            let line = line.trim_end_matches(['\n', '\r']);
+            match classify_download_line(line) {
+                DownloadLine::Saved(printed) => {
+                    progress.finish();
+                    match validate_saved_path(printed, &canonical_dir) {
+                        Some(path) if saved.len() < MAX_SAVED_PATHS => saved.push(path),
+                        _ => eprintln!("warning: ignoring unexpected saved path from yt-dlp: {}", sanitize_for_display(printed)),
+                    }
+                }
+                DownloadLine::Progress(text) => progress.show(text),
+                DownloadLine::Other(text) => {
+                    progress.finish();
+                    eprintln!("{text}");
+                }
+            }
+        }
+    }
+    let status = child.wait()?;
+    progress.finish();
+    Ok(DownloadOutcome { saved, exited_ok: status.success() })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chapter {
     pub title: String,
@@ -813,6 +947,113 @@ mod tests {
         std::env::remove_var("LOFI_YTDLP_BIN");
         assert_eq!(missing, Probe::Unknown);
         assert_eq!(garbage, Probe::Unknown);
+    }
+
+    #[test]
+    fn download_lines_are_split_into_saved_paths_progress_and_everything_else() {
+        assert_eq!(classify_download_line("LOFI-SAVED:/data/a.m4a"), DownloadLine::Saved("/data/a.m4a"));
+        assert_eq!(
+            classify_download_line("[download]  42.0% of 1.25MiB"),
+            DownloadLine::Progress("[download]  42.0% of 1.25MiB")
+        );
+        assert_eq!(classify_download_line("/data/a.m4a"), DownloadLine::Other("/data/a.m4a"));
+    }
+
+    #[test]
+    fn validate_saved_path_accepts_only_regular_files_directly_inside_the_target_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(target.join("sub")).unwrap();
+        std::fs::write(target.join("a.m4a"), b"x").unwrap();
+        std::fs::write(target.join("sub/b.m4a"), b"x").unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", target.join("link.m4a")).unwrap();
+        let good = target.join("a.m4a");
+        assert_eq!(validate_saved_path(good.to_str().unwrap(), &target), Some(good.to_str().unwrap().to_string()));
+        for bad in [
+            target.join("sub/b.m4a").to_str().unwrap().to_string(),
+            target.join("link.m4a").to_str().unwrap().to_string(),
+            target.join("missing.m4a").to_str().unwrap().to_string(),
+            target.join("sub").to_str().unwrap().to_string(),
+            "a.m4a".to_string(),
+            "/etc/passwd".to_string(),
+        ] {
+            assert_eq!(validate_saved_path(&bad, &target), None, "{bad}");
+        }
+    }
+
+    // Simulates a download: saves "<-P dir>/<-o template, filled in>" and
+    // prints the marker line, or fails for URLs containing "fail".
+    fn fake_downloading_yt_dlp(dir: &std::path::Path, exit_code: i32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-yt-dlp-download");
+        let script = format!(
+            r#"#!/bin/sh
+for a; do printf '%s\n' "$a"; done > '{args}'
+prev=""; for a; do case "$prev" in -P) out="$a";; -o) tmpl="$a";; esac; prev="$a"; done
+case "$prev" in *fail*) echo "ERROR: Private video" >&2; exit 1;; esac
+name=$(printf '%s' "$tmpl" | sed 's/%(title)s/Some_Title/; s/%(ext)s/m4a/')
+echo "[download]  50.0% of 1.00MiB"
+: > "$out/$name"
+echo "LOFI-SAVED:$out/$name"
+echo "LOFI-SAVED:/etc/passwd"
+exit {exit_code}
+"#,
+            args = dir.join("yt-dlp-args").display()
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn download_audio_returns_the_validated_saved_path_and_passes_safe_arguments() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("rainy-day");
+        std::fs::create_dir(&target).unwrap();
+        std::env::set_var("LOFI_YTDLP_BIN", fake_downloading_yt_dlp(dir.path(), 0));
+        let outcome = download_audio("https://www.youtube.com/watch?v=abc", &target, "%(title)s.%(ext)s", "bestaudio/worst");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        let expected = std::fs::canonicalize(&target).unwrap().join("Some_Title.m4a");
+        assert_eq!(
+            outcome.unwrap(),
+            DownloadOutcome { saved: vec![expected.to_str().unwrap().to_string()], exited_ok: true },
+            "the out-of-directory path must be ignored"
+        );
+        let args = recorded_yt_dlp_args(dir.path());
+        let separator = args.iter().position(|a| a == "--").expect("missing -- separator");
+        assert_eq!(args[separator + 1], "https://www.youtube.com/watch?v=abc");
+        let options = &args[..separator];
+        let value_of = |flag: &str| options[options.iter().position(|a| a == flag).unwrap() + 1].clone();
+        assert_eq!(value_of("-f"), "bestaudio/worst");
+        assert_eq!(value_of("-o"), "%(title)s.%(ext)s");
+        assert_eq!(value_of("--print"), "after_move:LOFI-SAVED:%(filepath)s");
+        for flag in ["--restrict-filenames", "--no-warnings", "--no-playlist", "--progress"] {
+            assert!(options.contains(&flag.to_string()), "missing {flag}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn download_audio_keeps_a_saved_path_even_when_yt_dlp_then_fails() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LOFI_YTDLP_BIN", fake_downloading_yt_dlp(dir.path(), 1));
+        let partial = download_audio("https://example.com/v", dir.path(), "x.%(ext)s", "worstaudio/worst").unwrap();
+        let failed = download_audio("https://example.com/fail", dir.path(), "y.%(ext)s", "worstaudio/worst").unwrap();
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert_eq!(partial.saved.len(), 1);
+        assert!(!partial.exited_ok);
+        assert_eq!(failed, DownloadOutcome { saved: vec![], exited_ok: false });
+    }
+
+    #[test]
+    fn download_audio_reports_a_missing_yt_dlp_as_an_error() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("LOFI_YTDLP_BIN", "/nonexistent/definitely-not-yt-dlp");
+        let result = download_audio("https://example.com/v", dir.path(), "x.%(ext)s", "worstaudio/worst");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert!(result.is_err());
     }
 
     #[test]

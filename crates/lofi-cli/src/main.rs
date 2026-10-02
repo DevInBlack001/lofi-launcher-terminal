@@ -2,6 +2,7 @@ mod add;
 mod client;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::io::IsTerminal;
 use lofi_common::Command as DaemonCommand;
 
 #[derive(Parser)]
@@ -38,11 +39,18 @@ enum Cmd {
     Quality { level: QualityLevel },
     /// Open an interactive browser for moods, their sources, and chapters of URL sources
     Tui,
-    /// Classify a source into a mood (or use an explicit mood) and add it to the config
+    /// Classify a source into a mood (or use an explicit mood) and add it to the config; a playlist URL adds every entry, each classified on its own
     Add {
         source: String,
+        /// Mood to add to; for a playlist, only used for entries whose title matches no mood
         #[arg(long)]
         mood: Option<String>,
+        /// Download the audio of a URL (or every playlist entry) instead of streaming it, without asking
+        #[arg(long, conflicts_with = "no_download")]
+        download: bool,
+        /// Stream a URL without asking whether to download it
+        #[arg(long)]
+        no_download: bool,
     },
 }
 
@@ -134,8 +142,17 @@ fn main() -> anyhow::Result<()> {
         return tui::run(socket);
     }
 
-    if let Cmd::Add { source, mood } = &cli.command {
-        let code = add::run(&socket, source, mood.as_deref())?;
+    if let Cmd::Add { source, mood, download, no_download } = &cli.command {
+        let opts = add::AddOptions {
+            mood: mood.clone(),
+            download: match (download, no_download) {
+                (true, _) => add::DownloadFlag::Download,
+                (_, true) => add::DownloadFlag::NoDownload,
+                _ => add::DownloadFlag::Ask,
+            },
+            stdin_is_terminal: std::io::stdin().is_terminal(),
+        };
+        let code = add::run(&socket, source, &opts)?;
         if code != 0 {
             std::process::exit(code);
         }
@@ -189,6 +206,19 @@ mod tests {
         assert!(matches!(Cli::try_parse_from(["lofi", "loop", "off"]).unwrap().command, Cmd::Loop { state: OnOff::Off }));
         assert!(Cli::try_parse_from(["lofi", "loop", "maybe"]).is_err());
         assert!(Cli::try_parse_from(["lofi", "loop"]).is_err());
+    }
+
+    #[test]
+    fn add_download_flags_are_optional_and_mutually_exclusive() {
+        let parse = |args: &[&str]| match Cli::try_parse_from(args).map(|c| c.command) {
+            Ok(Cmd::Add { download, no_download, .. }) => Ok((download, no_download)),
+            Ok(_) => panic!("parsed as the wrong subcommand"),
+            Err(e) => Err(e),
+        };
+        assert_eq!(parse(&["lofi", "add", "u"]).unwrap(), (false, false));
+        assert_eq!(parse(&["lofi", "add", "u", "--download"]).unwrap(), (true, false));
+        assert_eq!(parse(&["lofi", "add", "u", "--no-download", "--mood", "ambient"]).unwrap(), (false, true));
+        assert!(parse(&["lofi", "add", "u", "--download", "--no-download"]).is_err());
     }
 
     #[test]
