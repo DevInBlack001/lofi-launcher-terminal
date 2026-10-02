@@ -83,6 +83,29 @@ pub fn config_path() -> PathBuf {
     base.join("lofi-launcher").join("config.toml")
 }
 
+pub fn data_dir() -> PathBuf {
+    let base = xdg_absolute_dir("XDG_DATA_HOME")
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").expect("HOME must be set");
+            PathBuf::from(home).join(".local").join("share")
+        });
+    base.join("lofi-launcher")
+}
+
+// Mood names come from config.toml keys, which can be any string; this one
+// becomes a directory name and is handed to yt-dlp, which expands "$VAR" in
+// output paths.
+pub fn mood_download_dir(mood: &str) -> anyhow::Result<PathBuf> {
+    let unsafe_name = mood.is_empty()
+        || mood == "."
+        || mood == ".."
+        || mood.chars().any(|c| c == '/' || c == '$' || c.is_control());
+    if unsafe_name {
+        anyhow::bail!("mood name '{}' cannot be used as a download directory name", mood.escape_debug());
+    }
+    Ok(data_dir().join(mood))
+}
+
 pub fn load_config(path: &std::path::Path) -> anyhow::Result<Config> {
     let text = std::fs::read_to_string(path)?;
     let cfg: Config = toml::from_str(&text)?;
@@ -292,6 +315,42 @@ mod tests {
             let path = config_path();
             std::env::remove_var("XDG_CONFIG_HOME");
             assert_eq!(path, fallback, "XDG_CONFIG_HOME={bad:?} was not ignored");
+        }
+    }
+
+    #[test]
+    fn data_dir_treats_empty_or_relative_xdg_data_home_as_unset() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let home = std::env::var_os("HOME").expect("HOME must be set for this test");
+        let fallback = PathBuf::from(home).join(".local/share/lofi-launcher");
+        for bad in ["", "relative/data"] {
+            std::env::set_var("XDG_DATA_HOME", bad);
+            let path = data_dir();
+            std::env::remove_var("XDG_DATA_HOME");
+            assert_eq!(path, fallback, "XDG_DATA_HOME={bad:?} was not ignored");
+        }
+        assert_eq!(data_dir(), fallback);
+    }
+
+    #[test]
+    fn data_dir_respects_xdg_data_home() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("XDG_DATA_HOME", "/tmp/lofi-test-xdg-data");
+        let path = data_dir();
+        let mood_dir = mood_download_dir("rainy-day");
+        std::env::remove_var("XDG_DATA_HOME");
+        assert_eq!(path, PathBuf::from("/tmp/lofi-test-xdg-data/lofi-launcher"));
+        assert_eq!(mood_dir.unwrap(), PathBuf::from("/tmp/lofi-test-xdg-data/lofi-launcher/rainy-day"));
+    }
+
+    #[test]
+    fn mood_download_dir_rejects_names_that_are_not_one_plain_path_component() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        for bad in ["", ".", "..", "a/b", "../etc", "$HOME", "x\ny"] {
+            assert!(mood_download_dir(bad).is_err(), "{bad:?} was accepted");
+        }
+        for good in BUILTIN_MOODS {
+            assert!(mood_download_dir(good).unwrap().ends_with(good));
         }
     }
 
