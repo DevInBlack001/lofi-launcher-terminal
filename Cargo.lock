@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "lofi-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "lofi-common"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "lofi-daemon"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ctrlc",
