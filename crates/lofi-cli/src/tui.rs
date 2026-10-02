@@ -18,6 +18,14 @@ fn refresh_status(socket: &Path, current_mood: &mut String, state_label: &mut &'
     }
 }
 
+fn action_error(result: anyhow::Result<lofi_common::Response>) -> Option<String> {
+    match result {
+        Ok(lofi_common::Response::Error(msg)) => Some(msg),
+        Ok(_) => None,
+        Err(e) => Some(e.to_string()),
+    }
+}
+
 pub fn run(socket: PathBuf) -> anyhow::Result<()> {
     let moods = match client::send_command(&socket, &lofi_common::Command::Moods)? {
         lofi_common::Response::Moods(names) => names,
@@ -27,6 +35,8 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
     let mut current_mood = "unknown".to_string();
     let mut state_label = "unknown";
     refresh_status(&socket, &mut current_mood, &mut state_label);
+    // Cleared by the next successful action rather than on a timer.
+    let mut last_error: Option<String> = None;
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -60,8 +70,13 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                 .highlight_symbol(">> ");
             frame.render_stateful_widget(list, chunks[1], &mut list_state);
 
-            let footer = Paragraph::new("enter: select  p: pause  r: resume  n: next  q: quit")
-                .block(Block::default().borders(Borders::ALL).title("keys").padding(Padding::horizontal(1)));
+            let footer = match &last_error {
+                Some(msg) => Paragraph::new(format!("error: {msg}"))
+                    .style(Style::default().add_modifier(Modifier::BOLD))
+                    .block(Block::default().borders(Borders::ALL).title("error").padding(Padding::horizontal(1))),
+                None => Paragraph::new("enter: select  p: pause  r: resume  n: next  q: quit")
+                    .block(Block::default().borders(Borders::ALL).title("keys").padding(Padding::horizontal(1))),
+            };
             frame.render_widget(footer, chunks[2]);
         }) {
             break Err(e.into());
@@ -90,19 +105,19 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                     }
                     KeyCode::Enter => {
                         let name = moods[selected].clone();
-                        let _ = client::send_command(&socket, &lofi_common::Command::Mood(name));
+                        last_error = action_error(client::send_command(&socket, &lofi_common::Command::Mood(name)));
                         refresh_status(&socket, &mut current_mood, &mut state_label);
                     }
                     KeyCode::Char('p') => {
-                        let _ = client::send_command(&socket, &lofi_common::Command::Pause);
+                        last_error = action_error(client::send_command(&socket, &lofi_common::Command::Pause));
                         refresh_status(&socket, &mut current_mood, &mut state_label);
                     }
                     KeyCode::Char('r') => {
-                        let _ = client::send_command(&socket, &lofi_common::Command::Resume);
+                        last_error = action_error(client::send_command(&socket, &lofi_common::Command::Resume));
                         refresh_status(&socket, &mut current_mood, &mut state_label);
                     }
                     KeyCode::Char('n') => {
-                        let _ = client::send_command(&socket, &lofi_common::Command::Next);
+                        last_error = action_error(client::send_command(&socket, &lofi_common::Command::Next));
                         refresh_status(&socket, &mut current_mood, &mut state_label);
                     }
                     KeyCode::Char('q') => break Ok(()),
@@ -115,4 +130,22 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_error_surfaces_daemon_errors_and_transport_failures() {
+        assert_eq!(
+            action_error(Ok(lofi_common::Response::Error("mood 'ambient' has no sources configured".into()))),
+            Some("mood 'ambient' has no sources configured".to_string())
+        );
+        assert_eq!(
+            action_error(Err(anyhow::anyhow!("connection refused"))),
+            Some("connection refused".to_string())
+        );
+        assert_eq!(action_error(Ok(lofi_common::Response::Ok)), None);
+    }
 }
