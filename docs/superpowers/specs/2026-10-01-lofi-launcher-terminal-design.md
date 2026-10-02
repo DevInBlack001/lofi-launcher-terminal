@@ -28,7 +28,7 @@ Two binaries from one Cargo workspace:
 - A long source (longer than a configured threshold, default 20 minutes) plays from a random start offset each time it's selected, looping back to the start of the file when playback reaches the end, so a multi-hour mix feels like varied clips without downloading or re-encoding anything.
 - Keeps an in-memory session refcount. `register` increments it; a count that was 0 starts playback of the current mood's sources. `unregister` decrements it; a count that reaches 0 stops playback while keeping the daemon and mpv process resident (idle), so the next `register` resumes instantly.
 - Self-spawns: the CLI checks for the daemon socket and launches the daemon as a detached background process when it's absent, before sending the command. A user systemd unit remains an easy manual alternative for anyone who wants one.
-- Reads `~/.config/lofi-launcher/config.toml` on startup and on `SIGHUP`/explicit `reload` command.
+- Reads `~/.config/lofi-launcher/config.toml` on startup and on an explicit `reload` command (`lofi reload`). Reload is not triggered by `SIGHUP`: the daemon's signal handling (the `ctrlc` crate's `termination` feature) delivers SIGHUP, SIGINT, SIGTERM, and SIGQUIT through one callback with no way to tell which signal fired, so it cannot reload on SIGHUP while quitting on SIGTERM. Supporting SIGHUP reload would mean switching to a different signal-handling crate, which is deliberately out of scope for now.
 
 ### CLI client (`lofi`)
 
@@ -38,6 +38,7 @@ Two binaries from one Cargo workspace:
 - `lofi pause` / `lofi resume`: pause/resume while keeping the session count.
 - `lofi status`: prints current mood, playing/paused, current source.
 - `lofi moods`: lists configured mood names.
+- `lofi reload`: tells the daemon to re-read `config.toml` (for example after hand-editing it) without restarting it or stopping playback.
 - `lofi add <source>`: classifies a source (a local path or a URL) into a mood and appends it to that mood's source list in the config file. See "Adding sources and auto-classification" below.
 - `lofi tui`: opens a ratatui screen showing current mood/track with arrow-key mood selection and pause/skip, calling the same socket commands as the CLI subcommands.
 
@@ -87,10 +88,10 @@ Most lofi content on YouTube is a single long video (a multi-hour mix), not a pl
 
 `lofi add <source>` resolves which mood a new source belongs in automatically:
 
-1. For a URL, the daemon runs `yt-dlp --dump-json --skip-download <url>` to fetch the title and description as metadata only, without downloading media.
-2. The title and description are matched, case-insensitively, against the `[classifier]` keyword lists in the config, in the order the moods are declared. The first match wins.
+1. For a URL, the CLI runs `yt-dlp --dump-json --skip-download --no-playlist --socket-timeout 10 -- <url>` to fetch the title and description as metadata only, without downloading media.
+2. The title and description are scored, case-insensitively, against the `[classifier]` keyword lists in the config: each keyword occurrence in the title counts three times as much as one in the description, and the highest-scoring mood wins (ties go to the alphabetically first mood).
 3. If nothing matches (or the source is a local file with no embedded metadata to match against), `lofi add` reports that it could not classify the source and asks the user to re-run with an explicit mood: `lofi add <source> --mood <name>`.
-4. On a successful match or an explicit `--mood` flag, the source is appended to that mood's `sources` list in `~/.config/lofi-launcher/config.toml`, and the daemon is told to reload its config.
+4. On a successful match or an explicit `--mood` flag, the daemon re-reads `~/.config/lofi-launcher/config.toml` from disk (so hand edits made while it was running are kept), appends the source to that mood's `sources` list, writes the file back atomically, and updates its in-memory config to match.
 
 A multi-hour source is never downloaded or cut into separate clip files. Instead, when the daemon selects a source whose duration (from `yt-dlp --dump-json`'s `duration` field, cached alongside the source so it isn't re-fetched on every playback) exceeds a configurable threshold (default 20 minutes, set via `long_source_minutes` in the config), it tells mpv to seek to a random timestamp within the file before playing, and to loop back to the start if playback reaches the end of the file. This gives the effect of varied clips from a single long mix with no extra storage, no `ffmpeg` dependency, and no background trimming job.
 

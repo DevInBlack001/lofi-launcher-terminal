@@ -42,6 +42,11 @@ Open a new terminal afterward to pick up the shell integration.
 ./scripts/update.sh
 ```
 
+The update stops a running `lofi-daemon` so the new binary takes over; the
+new daemon starts on the next `lofi` command. Playback stops until a new
+terminal opens, and terminals that were already open are not counted by the
+new daemon.
+
 ## Uninstall
 
 ```sh
@@ -68,18 +73,33 @@ whichever mood's list fits, they don't get their own mood keys. A long
 source (a multi-hour YouTube mix, for example) is never downloaded or cut
 into clips; mpv just seeks to a random point in it each time it's selected.
 
+The daemon reads `config.toml` once at startup, so after editing the file by
+hand run `lofi reload` (or restart the daemon) for the changes to take
+effect. `lofi add` always re-reads the file before appending, so it never
+overwrites hand edits, though it does rewrite the file without its comments.
+
 ## CLI
 
 ```sh
-lofi status            # show current mood, playing/paused, current source
+lofi status            # show current mood, playing/paused/stopped, current source
 lofi mood deep-focus    # switch mood
 lofi next               # skip to the next source in the current mood
 lofi pause / lofi resume
 lofi moods              # list configured mood names
-lofi add <url-or-path>  # classify a source into a mood and add it
+lofi reload             # re-read config.toml after editing it by hand
+lofi add <url>          # classify a URL into a mood and add it
 lofi add <url-or-path> --mood ambient  # add it to a specific mood directly
 lofi tui                # interactive mood picker
 ```
+
+Classification works from a URL's title and description, so `lofi add` on a
+local file path always needs `--mood`. Local paths are stored as absolute
+paths, so relative paths like `./mix.mp3` work from any directory.
+
+Only one `lofi-daemon` runs per user. Every `lofi` command starts it on
+demand, so you normally never run it yourself; if you do start
+`lofi-daemon` by hand while one is already running, it prints "another
+lofi-daemon is already running" and exits.
 
 ## Requirements
 
