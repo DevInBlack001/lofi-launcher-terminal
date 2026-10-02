@@ -1,3 +1,4 @@
+mod add;
 mod client;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -98,7 +99,7 @@ pub(crate) fn playback_state_label(playing: bool, paused: bool) -> &'static str 
     }
 }
 
-fn print_response(resp: lofi_common::Response) {
+pub(crate) fn print_response(resp: lofi_common::Response) {
     match resp {
         lofi_common::Response::Ok => println!("ok"),
         lofi_common::Response::Error(msg) => eprintln!("error: {msg}"),
@@ -134,22 +135,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Cmd::Add { source, mood } = &cli.command {
-        let source = client::resolve_source(source)?;
-        let resolved_mood = match mood {
-            Some(m) => Some(m.clone()),
-            None => client::classify_source(&source)?,
-        };
-        if resolved_mood.is_none() {
-            eprintln!(
-                "could not classify '{source}' into a mood automatically; re-run with --mood <name>"
-            );
-            std::process::exit(1);
+        let code = add::run(&socket, source, mood.as_deref())?;
+        if code != 0 {
+            std::process::exit(code);
         }
-        let resp = client::send_command(
-            &socket,
-            &DaemonCommand::Add { source, mood: resolved_mood },
-        )?;
-        print_response(resp);
         return Ok(());
     }
 

@@ -101,17 +101,22 @@ pub fn is_local_source(source: &str) -> bool {
     Path::new(source).exists() || !source.contains("://")
 }
 
+fn yt_dlp_binary() -> String {
+    std::env::var("LOFI_YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".to_string())
+}
+
 // Errors are returned as messages rather than printed, since the TUI calls
 // this while it owns the terminal and stray stderr output would corrupt it.
 fn fetch_yt_dlp_metadata(source: &str) -> Result<serde_json::Value, String> {
+    // A source is one playable unit; a playlist URL would otherwise emit one
+    // JSON document per entry, unbounded and unparseable as one value.
+    run_yt_dlp_json(&["--dump-json", "--skip-download", "--no-playlist"], source)
+}
+
+fn run_yt_dlp_json(options: &[&str], source: &str) -> Result<serde_json::Value, String> {
     let not_detected = || format!("yt-dlp not detected or failed to fetch metadata for '{source}'");
-    let yt_dlp_bin = std::env::var("LOFI_YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".to_string());
-    let child = std::process::Command::new(&yt_dlp_bin)
-        .arg("--dump-json")
-        .arg("--skip-download")
-        // A source is one playable unit; a playlist URL would otherwise emit
-        // one JSON document per entry, unbounded and unparseable as one value.
-        .arg("--no-playlist")
+    let child = std::process::Command::new(yt_dlp_binary())
+        .args(options)
         .arg("--socket-timeout")
         .arg("10")
         // Without the separator a source like "--config-locations=..." is
@@ -158,6 +163,136 @@ pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
     // default classifier keywords rather than failing on a missing file.
     let config = lofi_common::load_config_or_default(&lofi_common::config_path())?;
     Ok(lofi_common::classify(&config.classifier, title, description))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoInfo {
+    pub title: String,
+    pub description: String,
+    pub is_live: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaylistEntry {
+    // 1-based position in the playlist as yt-dlp listed it.
+    pub position: usize,
+    pub url: Option<String>,
+    // None for private or deleted videos, which yt-dlp still lists.
+    pub title: Option<String>,
+    pub description: String,
+    pub is_live: bool,
+    pub nested_playlist: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    Single(VideoInfo),
+    Playlist {
+        title: String,
+        entries: Vec<PlaylistEntry>,
+        // Entry count before capping at MAX_PLAYLIST_ENTRIES, when capped.
+        truncated_from: Option<usize>,
+    },
+    // The probe failed or returned a shape we do not recognize; callers fall
+    // back to treating the URL as a single video.
+    Unknown,
+}
+
+// Every entry becomes a config.toml line and a daemon round trip.
+pub const MAX_PLAYLIST_ENTRIES: usize = 1000;
+
+fn is_youtube_video_id(id: &str) -> bool {
+    id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn entry_url(entry: &serde_json::Value) -> Option<String> {
+    if let Some(url) = entry.get("url").and_then(|u| u.as_str()) {
+        if url.starts_with("https://") || url.starts_with("http://") {
+            return Some(url.to_string());
+        }
+    }
+    // Only YouTube ids map onto a URL we can build; other extractors' relative
+    // "url" values have no known base.
+    let ie_key = entry.get("ie_key").and_then(|k| k.as_str());
+    let id = entry.get("id").and_then(|i| i.as_str())?;
+    if matches!(ie_key, None | Some("Youtube")) && is_youtube_video_id(id) {
+        return Some(format!("https://www.youtube.com/watch?v={id}"));
+    }
+    None
+}
+
+fn is_live_json(json: &serde_json::Value) -> bool {
+    json.get("is_live").and_then(|v| v.as_bool()).unwrap_or(false)
+        || json.get("live_status").and_then(|v| v.as_str()) == Some("is_live")
+}
+
+fn parse_playlist_entry(position: usize, entry: &serde_json::Value) -> PlaylistEntry {
+    let title = entry
+        .get("title")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && !matches!(*t, "[Private video]" | "[Deleted video]"))
+        .map(str::to_string);
+    let nested_playlist = entry.get("_type").and_then(|t| t.as_str()) == Some("playlist")
+        || matches!(entry.get("ie_key").and_then(|k| k.as_str()), Some("YoutubeTab" | "YoutubePlaylist"));
+    PlaylistEntry {
+        position,
+        url: entry_url(entry),
+        title,
+        description: entry.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string(),
+        is_live: is_live_json(entry),
+        nested_playlist,
+    }
+}
+
+pub fn parse_probe(json: &serde_json::Value) -> Probe {
+    if let Some(entries) = json.get("entries").and_then(|e| e.as_array()) {
+        let parsed = entries
+            .iter()
+            .take(MAX_PLAYLIST_ENTRIES)
+            .enumerate()
+            .map(|(i, entry)| parse_playlist_entry(i + 1, entry))
+            .collect();
+        return Probe::Playlist {
+            title: json.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+            entries: parsed,
+            truncated_from: (entries.len() > MAX_PLAYLIST_ENTRIES).then_some(entries.len()),
+        };
+    }
+    if json.get("_type").and_then(|t| t.as_str()) == Some("playlist") {
+        return Probe::Unknown;
+    }
+    match json.get("title").and_then(|t| t.as_str()) {
+        Some(title) => Probe::Single(VideoInfo {
+            title: title.to_string(),
+            description: json.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string(),
+            is_live: is_live_json(json),
+        }),
+        None => Probe::Unknown,
+    }
+}
+
+// Callers must have ruled out local sources first: this always runs yt-dlp.
+pub fn probe_url(source: &str) -> Probe {
+    match run_yt_dlp_json(&["--flat-playlist", "--dump-single-json", "--no-warnings"], source) {
+        Ok(json) => parse_probe(&json),
+        Err(_) => Probe::Unknown,
+    }
+}
+
+// The single-video fallback when the playlist probe could not tell; prints
+// the same message classify_source does on failure.
+pub fn fetch_video_info(source: &str) -> Option<VideoInfo> {
+    match fetch_yt_dlp_metadata(source) {
+        Ok(json) => match parse_probe(&json) {
+            Probe::Single(info) => Some(info),
+            _ => None,
+        },
+        Err(message) => {
+            eprintln!("{message}");
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,8 +349,43 @@ pub fn fetch_chapters(source: &str) -> anyhow::Result<Vec<Chapter>> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn fake_yt_dlp_script(dir: &std::path::Path, stdout: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-yt-dlp");
+        let out_file = dir.join("yt-dlp-stdout");
+        std::fs::write(&out_file, stdout).unwrap();
+        let args_file = dir.join("yt-dlp-args");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nfor a; do printf '%s\\n' \"$a\"; done > '{}'\ncat '{}'\n",
+                args_file.display(),
+                out_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    pub(crate) fn recorded_yt_dlp_args(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("yt-dlp-args"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_support::*;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
 
@@ -240,10 +410,6 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let resp = send_command(&socket_path, &lofi_common::Command::Register).unwrap();
         assert!(matches!(resp, lofi_common::Response::Ok));
-    }
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn fake_daemon_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
@@ -285,25 +451,6 @@ mod tests {
         std::env::remove_var("LOFI_DAEMON_BIN");
         drop(winner.join().unwrap());
         result.unwrap();
-    }
-
-    fn fake_yt_dlp_script(dir: &std::path::Path, stdout: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("fake-yt-dlp");
-        let out_file = dir.join("yt-dlp-stdout");
-        std::fs::write(&out_file, stdout).unwrap();
-        let args_file = dir.join("yt-dlp-args");
-        std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\nfor a; do printf '%s\\n' \"$a\"; done > '{}'\ncat '{}'\n",
-                args_file.display(),
-                out_file.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
     }
 
     #[test]
@@ -359,14 +506,6 @@ mod tests {
             "https://www.youtube.com/watch?v=abc"
         );
         assert_eq!(resolve_source("./definitely-missing.mp3").unwrap(), "./definitely-missing.mp3");
-    }
-
-    fn recorded_yt_dlp_args(dir: &std::path::Path) -> Vec<String> {
-        std::fs::read_to_string(dir.join("yt-dlp-args"))
-            .unwrap()
-            .lines()
-            .map(str::to_string)
-            .collect()
     }
 
     #[test]
@@ -530,6 +669,150 @@ mod tests {
         let resolved = daemon_binary();
         std::env::remove_var("LOFI_DAEMON_BIN");
         assert_eq!(resolved, std::path::PathBuf::from("/tmp/some-custom-lofi-daemon"));
+    }
+
+    // Trimmed from a real `yt-dlp --flat-playlist --dump-single-json` of a
+    // YouTube playlist (yt-dlp 2026.08.19), including a private video's stub.
+    const SAMPLE_FLAT_PLAYLIST_JSON: &str = r#"{
+        "id": "PLgouNNTJjiigY4HZ9BQuMPioOmJk_bans",
+        "title": "Rainy Night Lofi",
+        "description": "",
+        "_type": "playlist",
+        "extractor_key": "YoutubeTab",
+        "entries": [
+            {"_type": "url", "ie_key": "Youtube", "id": "i778hCmt5gk",
+             "url": "https://www.youtube.com/watch?v=i778hCmt5gk",
+             "title": "Just relax and fall asleep - Lofi Hip Hop Mix", "duration": 4298, "live_status": null},
+            {"_type": "url", "ie_key": "Youtube", "id": "l6_lDBspku4",
+             "url": "https://www.youtube.com/watch?v=l6_lDBspku4",
+             "title": null, "duration": null, "live_status": null},
+            {"_type": "url", "ie_key": "Youtube", "id": "Uo7AK05SVpk",
+             "title": "3 Hours Of Rain Sounds On Window", "live_status": "is_live"}
+        ]
+    }"#;
+
+    // Trimmed from a real flat dump of a single watch URL: the full video
+    // metadata, with no entries array.
+    const SAMPLE_FLAT_SINGLE_VIDEO_JSON: &str = r#"{
+        "id": "dQw4w9WgXcQ",
+        "title": "Heavy rain lofi",
+        "description": "a long description",
+        "_type": "video",
+        "is_live": false,
+        "webpage_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    }"#;
+
+    #[test]
+    fn parse_probe_recognizes_a_flat_playlist_and_its_entries() {
+        let json: serde_json::Value = serde_json::from_str(SAMPLE_FLAT_PLAYLIST_JSON).unwrap();
+        let Probe::Playlist { title, entries, truncated_from } = parse_probe(&json) else {
+            panic!("not detected as a playlist");
+        };
+        assert_eq!(title, "Rainy Night Lofi");
+        assert_eq!(truncated_from, None);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].position, 1);
+        assert_eq!(entries[0].url.as_deref(), Some("https://www.youtube.com/watch?v=i778hCmt5gk"));
+        assert_eq!(entries[0].title.as_deref(), Some("Just relax and fall asleep - Lofi Hip Hop Mix"));
+        assert!(!entries[0].is_live && !entries[0].nested_playlist);
+        assert_eq!(entries[1].title, None, "a private video's null title must not look classifiable");
+        // No "url" field: rebuilt from the id.
+        assert_eq!(entries[2].url.as_deref(), Some("https://www.youtube.com/watch?v=Uo7AK05SVpk"));
+        assert!(entries[2].is_live);
+    }
+
+    #[test]
+    fn parse_probe_recognizes_a_single_video() {
+        let json: serde_json::Value = serde_json::from_str(SAMPLE_FLAT_SINGLE_VIDEO_JSON).unwrap();
+        assert_eq!(
+            parse_probe(&json),
+            Probe::Single(VideoInfo {
+                title: "Heavy rain lofi".to_string(),
+                description: "a long description".to_string(),
+                is_live: false,
+            })
+        );
+        let live: serde_json::Value =
+            serde_json::from_str(r#"{"title": "lofi radio", "live_status": "is_live"}"#).unwrap();
+        assert!(matches!(parse_probe(&live), Probe::Single(VideoInfo { is_live: true, .. })));
+    }
+
+    #[test]
+    fn parse_probe_returns_unknown_for_unrecognized_shapes() {
+        for json in [
+            r#"{}"#,
+            r#"{"_type": "url", "url": "https://example.com/x"}"#,
+            r#"{"_type": "playlist", "title": "no entries array"}"#,
+            r#"{"_type": "playlist", "entries": "nope"}"#,
+            r#"[1, 2]"#,
+        ] {
+            assert_eq!(parse_probe(&serde_json::from_str(json).unwrap()), Probe::Unknown, "{json}");
+        }
+    }
+
+    #[test]
+    fn parse_probe_flags_nested_playlists_and_unbuildable_urls() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"_type": "playlist", "title": "search", "entries": [
+                {"_type": "url", "ie_key": "YoutubeTab", "id": "PLxyz",
+                 "url": "https://www.youtube.com/playlist?list=PLxyz", "title": "Rainy lofi"},
+                {"_type": "url", "ie_key": "Vimeo", "id": "12345", "url": "12345", "title": "rain"},
+                {"_type": "url", "id": "bad id with spaces", "title": "rain"},
+                {"_type": "url", "ie_key": "Youtube", "id": "abcdefghijk", "title": "[Deleted video]"}
+            ]}"#,
+        )
+        .unwrap();
+        let Probe::Playlist { entries, .. } = parse_probe(&json) else { panic!() };
+        assert!(entries[0].nested_playlist);
+        assert_eq!(entries[1].url, None);
+        assert_eq!(entries[2].url, None);
+        assert_eq!(entries[3].title, None);
+        assert_eq!(entries[3].url.as_deref(), Some("https://www.youtube.com/watch?v=abcdefghijk"));
+    }
+
+    #[test]
+    fn parse_probe_caps_the_number_of_playlist_entries() {
+        let entries: Vec<String> = (0..MAX_PLAYLIST_ENTRIES + 5)
+            .map(|i| format!(r#"{{"id": "id{i:09}", "title": "t"}}"#))
+            .collect();
+        let json: serde_json::Value =
+            serde_json::from_str(&format!(r#"{{"_type": "playlist", "entries": [{}]}}"#, entries.join(","))).unwrap();
+        let Probe::Playlist { entries, truncated_from, .. } = parse_probe(&json) else { panic!() };
+        assert_eq!(entries.len(), MAX_PLAYLIST_ENTRIES);
+        assert_eq!(truncated_from, Some(MAX_PLAYLIST_ENTRIES + 5));
+    }
+
+    #[test]
+    fn probe_url_uses_a_flat_single_document_dump_after_a_separator() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(dir.path(), SAMPLE_FLAT_PLAYLIST_JSON);
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let probe = probe_url("https://www.youtube.com/playlist?list=PLxyz");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert!(matches!(probe, Probe::Playlist { .. }));
+        let args = recorded_yt_dlp_args(dir.path());
+        let separator = args.iter().position(|a| a == "--").expect("missing -- separator");
+        let options = &args[..separator];
+        for flag in ["--flat-playlist", "--dump-single-json", "--no-warnings", "--socket-timeout"] {
+            assert!(options.contains(&flag.to_string()), "missing {flag}: {args:?}");
+        }
+        assert!(!options.contains(&"--no-playlist".to_string()));
+        assert_eq!(args[separator + 1], "https://www.youtube.com/playlist?list=PLxyz");
+    }
+
+    #[test]
+    fn probe_url_degrades_to_unknown_when_yt_dlp_is_missing_or_output_is_garbage() {
+        let _guard = env_lock();
+        std::env::set_var("LOFI_YTDLP_BIN", "/nonexistent/definitely-not-yt-dlp");
+        let missing = probe_url("https://example.com/some-video");
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(dir.path(), "not json at all");
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        let garbage = probe_url("https://example.com/some-video");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        assert_eq!(missing, Probe::Unknown);
+        assert_eq!(garbage, Probe::Unknown);
     }
 
     #[test]
