@@ -77,6 +77,7 @@ enum Action {
     FetchChapters(String),
     Play { mood: String, index: usize, seek_seconds: Option<u64> },
     SwitchMood(String),
+    RemoveSource { mood: String, source: String },
 }
 
 struct Browser {
@@ -90,6 +91,8 @@ struct Browser {
     // The URL source Enter was pressed on while its chapters were still
     // loading; acted on when they arrive, unless the user has moved since.
     awaiting: Option<(String, usize, String)>,
+    // Source waiting for delete confirmation in Sources view
+    delete_pending: Option<String>,
 }
 
 impl Browser {
@@ -103,6 +106,7 @@ impl Browser {
             chapter_cache: HashMap::new(),
             loading: HashSet::new(),
             awaiting: None,
+            delete_pending: None,
         }
     }
 
@@ -125,6 +129,7 @@ impl Browser {
 
     fn set_selected(&mut self, value: usize) {
         self.awaiting = None;
+        self.delete_pending = None;
         match self.level {
             Level::Moods => self.mood_selected = value,
             Level::Sources { .. } => self.source_selected = value,
@@ -144,6 +149,7 @@ impl Browser {
 
     fn back(&mut self) {
         self.awaiting = None;
+        self.delete_pending = None;
         self.level = match std::mem::replace(&mut self.level, Level::Moods) {
             Level::Moods | Level::Sources { .. } => Level::Moods,
             Level::Chapters { mood, sources, .. } => Level::Sources { mood, sources },
@@ -152,6 +158,7 @@ impl Browser {
 
     fn show_sources(&mut self, mood: String, sources: Vec<String>) {
         self.awaiting = None;
+        self.delete_pending = None;
         self.source_selected = 0;
         self.level = Level::Sources { mood, sources };
     }
@@ -246,6 +253,26 @@ impl Browser {
         self.awaiting.as_ref().map(|(_, _, source)| source.as_str())
     }
 
+    fn request_delete(&mut self) -> Option<(String, String)> {
+        match &self.level {
+            Level::Sources { mood, sources } if self.source_selected < sources.len() => {
+                if let Some(source) = sources.get(self.source_selected) {
+                    if self.delete_pending.as_ref() == Some(source) {
+                        self.delete_pending = None;
+                        return Some((mood.clone(), source.clone()));
+                    }
+                    self.delete_pending = Some(source.clone());
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn cancel_delete(&mut self) {
+        self.delete_pending = None;
+    }
+
     fn breadcrumb(&self) -> String {
         match &self.level {
             Level::Moods => "moods".to_string(),
@@ -296,7 +323,7 @@ impl Browser {
         match self.level {
             Level::Moods => "enter: open  space: play mood  p/r: pause/resume  n: next  l: loop  a: quality  q: quit",
             Level::Sources { .. } => {
-                "enter: play/chapters  space: play from start  esc: back  p/r  n  l: loop  a: quality  q: quit"
+                "enter: play/chapters  space: play from start  d: delete  esc: back  p/r  n  l  a  q"
             }
             Level::Chapters { .. } => "enter: play from here  esc: back  p/r: pause/resume  n  l: loop  a: quality  q: quit",
         }
@@ -336,6 +363,7 @@ fn perform(
         }
         Action::Play { mood, index, seek_seconds } => lofi_common::Command::PlaySource { mood, index, seek_seconds },
         Action::SwitchMood(mood) => lofi_common::Command::Mood(mood),
+        Action::RemoveSource { mood, source } => lofi_common::Command::RemoveSource { mood, source },
     };
     action_error(client::send_command(socket, &command))
 }
@@ -414,6 +442,10 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
             } else if let Some(source) = browser.awaiting_source() {
                 Paragraph::new(format!("loading chapters for {}...", short_source_label(source)))
                     .block(Block::default().borders(Borders::ALL).title("loading").padding(Padding::horizontal(1)))
+            } else if let Some(source) = &browser.delete_pending {
+                Paragraph::new(format!("press enter to confirm delete of '{}'  esc/backspace to cancel", short_source_label(source)))
+                    .style(Style::default().add_modifier(Modifier::BOLD))
+                    .block(Block::default().borders(Borders::ALL).title("confirm delete").padding(Padding::horizontal(1)))
             } else if let Some(msg) = &notice {
                 Paragraph::new(msg.as_str())
                     .block(Block::default().borders(Borders::ALL).title("note").padding(Padding::horizontal(1)))
@@ -439,27 +471,42 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                 notice = None;
                 let daemon_command = match key.code {
                     KeyCode::Up => {
+                        browser.cancel_delete();
                         browser.up();
                         None
                     }
                     KeyCode::Down => {
+                        browser.cancel_delete();
                         browser.down();
                         None
                     }
                     KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => {
+                        browser.cancel_delete();
                         browser.back();
                         None
                     }
                     KeyCode::Enter => {
-                        let action = browser.enter();
+                        if let Some((mood, source)) = browser.request_delete() {
+                            let action = Action::RemoveSource { mood, source };
+                            last_error = perform(action, &socket, &mut browser, &chapter_results_tx);
+                            refresh_status(&socket, &mut view);
+                            None
+                        } else {
+                            let action = browser.enter();
+                            last_error = perform(action, &socket, &mut browser, &chapter_results_tx);
+                            refresh_status(&socket, &mut view);
+                            None
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        browser.cancel_delete();
+                        let action = browser.play_from_start();
                         last_error = perform(action, &socket, &mut browser, &chapter_results_tx);
                         refresh_status(&socket, &mut view);
                         None
                     }
-                    KeyCode::Char(' ') => {
-                        let action = browser.play_from_start();
-                        last_error = perform(action, &socket, &mut browser, &chapter_results_tx);
-                        refresh_status(&socket, &mut view);
+                    KeyCode::Char('d') => {
+                        browser.request_delete();
                         None
                     }
                     KeyCode::Char('p') => Some(lofi_common::Command::Pause),
@@ -530,6 +577,7 @@ mod tests {
         let mut browser = browser_in_ambient();
         assert_eq!(browser.enter(), play(0, None));
         assert!(browser.loading.is_empty());
+        assert_eq!(browser.delete_pending, None);
     }
 
     #[test]
@@ -624,5 +672,25 @@ mod tests {
         let label = short_source_label(&long);
         assert!(label.ends_with("...") && label.chars().count() == MAX_BREADCRUMB_SOURCE_CHARS);
         assert_eq!(format_timestamp(3 * 3600 + 25 * 60 + 7), "03:25:07");
+    }
+
+    #[test]
+    fn delete_requires_confirmation_with_two_presses() {
+        let mut browser = browser_in_ambient();
+        assert_eq!(browser.delete_pending, None);
+        browser.request_delete();
+        assert_eq!(browser.delete_pending.as_deref(), Some(LOCAL));
+        let result = browser.request_delete();
+        assert_eq!(result, Some(("ambient".to_string(), LOCAL.to_string())));
+        assert_eq!(browser.delete_pending, None);
+    }
+
+    #[test]
+    fn delete_cancels_on_navigation() {
+        let mut browser = browser_in_ambient();
+        browser.request_delete();
+        assert_eq!(browser.delete_pending.as_deref(), Some(LOCAL));
+        browser.down();
+        assert_eq!(browser.delete_pending, None);
     }
 }
