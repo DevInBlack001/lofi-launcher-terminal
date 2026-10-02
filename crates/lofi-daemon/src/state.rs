@@ -8,6 +8,7 @@ pub struct DaemonState<M: MpvController> {
     current_mood: String,
     current_index: usize,
     playing: bool,
+    paused: bool,
     known_duration_seconds: Option<u64>,
 }
 
@@ -21,6 +22,7 @@ impl<M: MpvController> DaemonState<M> {
             current_mood,
             current_index: 0,
             playing: false,
+            paused: false,
             known_duration_seconds: None,
         }
     }
@@ -44,13 +46,17 @@ impl<M: MpvController> DaemonState<M> {
                     self.known_duration_seconds,
                     threshold_seconds,
                 );
-                match result {
-                    Ok(()) => {
-                        self.playing = true;
-                        Response::Ok
-                    }
-                    Err(e) => Response::Error(e.to_string()),
+                if let Err(e) = result {
+                    return Response::Error(e.to_string());
                 }
+                self.playing = true;
+                // mpv's pause property survives loadfile, so a source started after
+                // an earlier pause would otherwise load silently paused.
+                if let Err(e) = self.mpv.resume() {
+                    return Response::Error(e.to_string());
+                }
+                self.paused = false;
+                Response::Ok
             }
             None => Response::Error(format!("mood '{}' has no sources configured", self.current_mood)),
         }
@@ -127,11 +133,17 @@ impl<M: MpvController> DaemonState<M> {
                 self.start_current_mood()
             }
             Command::Pause => match self.mpv.pause() {
-                Ok(()) => Response::Ok,
+                Ok(()) => {
+                    self.paused = true;
+                    Response::Ok
+                }
                 Err(e) => Response::Error(e.to_string()),
             },
             Command::Resume => match self.mpv.resume() {
-                Ok(()) => Response::Ok,
+                Ok(()) => {
+                    self.paused = false;
+                    Response::Ok
+                }
                 Err(e) => Response::Error(e.to_string()),
             },
             Command::Status => {
@@ -141,9 +153,11 @@ impl<M: MpvController> DaemonState<M> {
                     .get(&self.current_mood)
                     .and_then(|m| m.sources.get(self.current_index))
                     .cloned();
+                let loaded = self.playing && self.session_count > 0;
                 Response::Status {
                     mood: self.current_mood.clone(),
-                    playing: self.playing,
+                    playing: loaded && !self.paused,
+                    paused: loaded && self.paused,
                     current_source,
                 }
             }
@@ -373,6 +387,61 @@ mod tests {
         state.handle(Command::Register);
         assert!(!state.mpv.last_seek_requested, "a 3 minute source must not request a seek");
         assert!(!state.mpv.loop_file_requested, "a 3 minute source must not request loop-file");
+    }
+
+    fn status_flags(state: &mut DaemonState<FakeMpv>) -> (bool, bool) {
+        match state.handle(Command::Status) {
+            Response::Status { playing, paused, .. } => (playing, paused),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_reports_stopped_before_any_session_registers() {
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        assert_eq!(status_flags(&mut state), (false, false));
+    }
+
+    #[test]
+    fn pause_and_resume_are_reflected_in_status() {
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        assert_eq!(status_flags(&mut state), (true, false));
+        assert!(matches!(state.handle(Command::Pause), Response::Ok));
+        assert_eq!(status_flags(&mut state), (false, true));
+        assert!(matches!(state.handle(Command::Resume), Response::Ok));
+        assert_eq!(status_flags(&mut state), (true, false));
+    }
+
+    #[test]
+    fn status_reports_stopped_after_last_session_unregisters_while_paused() {
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        state.handle(Command::Pause);
+        state.handle(Command::Unregister);
+        assert_eq!(status_flags(&mut state), (false, false));
+    }
+
+    #[test]
+    fn fresh_source_start_always_unpauses_mpv() {
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        state.handle(Command::Pause);
+        state.handle(Command::Unregister);
+        assert!(state.mpv.paused, "fake mpv keeps its pause flag across stop, like real mpv");
+        state.handle(Command::Register);
+        assert!(!state.mpv.paused, "new source must not inherit the old pause flag");
+        assert_eq!(status_flags(&mut state), (true, false));
+    }
+
+    #[test]
+    fn next_while_paused_starts_unpaused() {
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        state.handle(Command::Pause);
+        state.handle(Command::Next);
+        assert!(!state.mpv.paused);
+        assert_eq!(status_flags(&mut state), (true, false));
     }
 
     fn write_config_to(dir: &std::path::Path, config: &Config) -> std::path::PathBuf {

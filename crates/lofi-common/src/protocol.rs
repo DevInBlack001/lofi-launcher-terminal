@@ -22,7 +22,13 @@ pub enum Response {
     Error(String),
     Status {
         mood: String,
+        // True only while audibly playing: a session is registered, a source
+        // is loaded, and it is not paused.
         playing: bool,
+        // Defaulted so a CLI talking to a daemon built before this field
+        // existed still decodes its status.
+        #[serde(default)]
+        paused: bool,
         current_source: Option<String>,
     },
     Moods(Vec<String>),
@@ -65,16 +71,30 @@ mod tests {
     fn round_trips_status_response() {
         let resp = Response::Status {
             mood: "code-and-chill".to_string(),
-            playing: true,
+            playing: false,
+            paused: true,
             current_source: Some("https://example.com/playlist".to_string()),
         };
         let line = encode_response(&resp);
         let decoded = decode_response(line.trim_end()).unwrap();
         match decoded {
-            Response::Status { mood, playing, current_source } => {
+            Response::Status { mood, playing, paused, current_source } => {
                 assert_eq!(mood, "code-and-chill");
-                assert!(playing);
+                assert!(!playing);
+                assert!(paused);
                 assert_eq!(current_source.as_deref(), Some("https://example.com/playlist"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_status_from_a_daemon_that_predates_the_paused_field() {
+        let line = r#"{"kind":"Status","data":{"mood":"ambient","playing":true,"current_source":null}}"#;
+        match decode_response(line).unwrap() {
+            Response::Status { playing, paused, .. } => {
+                assert!(playing);
+                assert!(!paused);
             }
             other => panic!("unexpected {other:?}"),
         }

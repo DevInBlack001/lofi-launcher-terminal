@@ -48,12 +48,22 @@ fn runtime_socket() -> std::path::PathBuf {
     run_dir.join("lofi-daemon.sock")
 }
 
+pub(crate) fn playback_state_label(playing: bool, paused: bool) -> &'static str {
+    if playing {
+        "playing"
+    } else if paused {
+        "paused"
+    } else {
+        "stopped"
+    }
+}
+
 fn print_response(resp: lofi_common::Response) {
     match resp {
         lofi_common::Response::Ok => println!("ok"),
         lofi_common::Response::Error(msg) => eprintln!("error: {msg}"),
-        lofi_common::Response::Status { mood, playing, current_source } => {
-            let state = if playing { "playing" } else { "paused" };
+        lofi_common::Response::Status { mood, playing, paused, current_source } => {
+            let state = playback_state_label(playing, paused);
             let source = current_source.unwrap_or_else(|| "none".to_string());
             println!("mood: {mood}\nstate: {state}\nsource: {source}");
         }
@@ -117,3 +127,15 @@ fn main() -> anyhow::Result<()> {
 }
 
 mod tui;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playback_state_label_distinguishes_all_three_states() {
+        assert_eq!(playback_state_label(true, false), "playing");
+        assert_eq!(playback_state_label(false, true), "paused");
+        assert_eq!(playback_state_label(false, false), "stopped");
+    }
+}

@@ -5,7 +5,18 @@ use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
 use std::io::stdout;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+// The daemon is the source of truth for playback state (e.g. a mood with no
+// sources never starts), so re-ask it rather than guessing from the command sent.
+fn refresh_status(socket: &Path, current_mood: &mut String, state_label: &mut &'static str) {
+    if let Ok(lofi_common::Response::Status { mood, playing, paused, .. }) =
+        client::send_command(socket, &lofi_common::Command::Status)
+    {
+        *current_mood = mood;
+        *state_label = crate::playback_state_label(playing, paused);
+    }
+}
 
 pub fn run(socket: PathBuf) -> anyhow::Result<()> {
     let moods = match client::send_command(&socket, &lofi_common::Command::Moods)? {
@@ -13,11 +24,9 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
         other => anyhow::bail!("unexpected response listing moods: {other:?}"),
     };
 
-    let (mut current_mood, mut playing) =
-        match client::send_command(&socket, &lofi_common::Command::Status) {
-            Ok(lofi_common::Response::Status { mood, playing, .. }) => (mood, playing),
-            _ => ("unknown".to_string(), true),
-        };
+    let mut current_mood = "unknown".to_string();
+    let mut state_label = "unknown";
+    refresh_status(&socket, &mut current_mood, &mut state_label);
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -37,7 +46,6 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                 ])
                 .split(frame.area());
 
-            let state_label = if playing { "playing" } else { "paused" };
             let header = Paragraph::new(format!("mood: {current_mood}  ({state_label})"))
                 .block(Block::default().borders(Borders::ALL).title("lofi").padding(Padding::horizontal(1)));
             frame.render_widget(header, chunks[0]);
@@ -82,23 +90,20 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                     }
                     KeyCode::Enter => {
                         let name = moods[selected].clone();
-                        if client::send_command(&socket, &lofi_common::Command::Mood(name.clone())).is_ok() {
-                            current_mood = name;
-                            playing = true;
-                        }
+                        let _ = client::send_command(&socket, &lofi_common::Command::Mood(name));
+                        refresh_status(&socket, &mut current_mood, &mut state_label);
                     }
                     KeyCode::Char('p') => {
-                        if client::send_command(&socket, &lofi_common::Command::Pause).is_ok() {
-                            playing = false;
-                        }
+                        let _ = client::send_command(&socket, &lofi_common::Command::Pause);
+                        refresh_status(&socket, &mut current_mood, &mut state_label);
                     }
                     KeyCode::Char('r') => {
-                        if client::send_command(&socket, &lofi_common::Command::Resume).is_ok() {
-                            playing = true;
-                        }
+                        let _ = client::send_command(&socket, &lofi_common::Command::Resume);
+                        refresh_status(&socket, &mut current_mood, &mut state_label);
                     }
                     KeyCode::Char('n') => {
                         let _ = client::send_command(&socket, &lofi_common::Command::Next);
+                        refresh_status(&socket, &mut current_mood, &mut state_label);
                     }
                     KeyCode::Char('q') => break Ok(()),
                     _ => {}
