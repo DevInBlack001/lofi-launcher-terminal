@@ -67,10 +67,58 @@ if [ -n "$RC_FILE" ]; then
     fi
 fi
 
-# mpv and mpv-mpris are external dependencies this script doesn't install;
-# warn rather than fail, since the rest of the install still succeeds.
-if ! command -v mpv >/dev/null 2>&1; then
-    echo "Warning: mpv not detected on PATH, install it via your distro's package manager for playback to work."
+# mpv and yt-dlp are external runtime dependencies this script doesn't
+# build; offer to install whichever are missing via the detected package
+# manager, since most users won't otherwise know these are required.
+MISSING_DEPS=""
+command -v mpv >/dev/null 2>&1 || MISSING_DEPS="$MISSING_DEPS mpv"
+command -v yt-dlp >/dev/null 2>&1 || MISSING_DEPS="$MISSING_DEPS yt-dlp"
+
+if [ -n "$MISSING_DEPS" ]; then
+    # Detected by which package manager binary exists, not by distro name,
+    # since that works the same way across a distro's derivatives too.
+    # mpv-mpris is deliberately not auto-installed here, since it's optional
+    # and the separate check below already covers it with its own notice.
+    PKG_MANAGER=""
+    if command -v pacman >/dev/null 2>&1; then
+        PKG_MANAGER="pacman"
+        INSTALL_CMD="sudo pacman -S --needed$MISSING_DEPS"
+    elif command -v apt-get >/dev/null 2>&1; then
+        PKG_MANAGER="apt-get"
+        INSTALL_CMD="sudo apt-get install -y$MISSING_DEPS"
+    elif command -v dnf >/dev/null 2>&1; then
+        PKG_MANAGER="dnf"
+        INSTALL_CMD="sudo dnf install -y$MISSING_DEPS"
+    elif command -v zypper >/dev/null 2>&1; then
+        PKG_MANAGER="zypper"
+        INSTALL_CMD="sudo zypper install -y$MISSING_DEPS"
+    elif command -v apk >/dev/null 2>&1; then
+        PKG_MANAGER="apk"
+        INSTALL_CMD="sudo apk add$MISSING_DEPS"
+    fi
+
+    if [ -n "$PKG_MANAGER" ] && [ -t 0 ]; then
+        echo "Missing dependencies:$MISSING_DEPS"
+        printf "Install with: %s\n" "$INSTALL_CMD"
+        printf "Proceed? [y/N] "
+        read -r REPLY
+        case "$REPLY" in
+            [yY]|[yY][eE][sS])
+                if ! $INSTALL_CMD; then
+                    echo "Warning: dependency install failed, continuing without it."
+                fi
+                ;;
+            *)
+                echo "Skipped. Install these yourself for playback to work."
+                ;;
+        esac
+    elif [ -n "$PKG_MANAGER" ]; then
+        echo "Warning: missing dependencies ($MISSING_DEPS) and not running in an interactive"
+        echo "terminal, skipping the install prompt. Install with: $INSTALL_CMD"
+    else
+        echo "Warning: missing dependencies ($MISSING_DEPS) and no supported package manager"
+        echo "(pacman, apt-get, dnf, zypper, apk) detected; install them yourself for playback to work."
+    fi
 fi
 
 # Kept in sync with crates/lofi-daemon/src/mpv.rs's MPRIS_SCRIPT_CANDIDATES

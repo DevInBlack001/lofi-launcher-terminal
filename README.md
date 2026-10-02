@@ -41,6 +41,12 @@ combined stream is used instead.
 ./scripts/install.sh
 ```
 
+If `mpv` or `yt-dlp` aren't already installed, the script detects your
+package manager (`pacman`, `apt-get`, `dnf`, `zypper`, or `apk`) and offers
+to install them, showing the exact `sudo` command first and asking for
+confirmation; it never runs a privileged command without asking, and in a
+non-interactive run it just prints the command instead of running it.
+
 Open a new terminal afterward to pick up the shell integration.
 
 ## Update
