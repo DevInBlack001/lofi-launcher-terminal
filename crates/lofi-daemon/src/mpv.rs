@@ -1,7 +1,9 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub trait MpvController {
@@ -28,6 +30,94 @@ pub trait MpvController {
 pub struct RealMpv {
     socket_path: PathBuf,
     child: Child,
+    // Bumped on every source change so a background duration probe for an
+    // earlier source never seeks or loops whatever is playing now.
+    generation: Arc<AtomicU64>,
+}
+
+const DEFAULT_IPC_TIMEOUT: Duration = Duration::from_secs(2);
+// Network sources resolve through yt-dlp, which routinely takes several
+// seconds. The probe runs off the daemon's lock, so it can afford to wait.
+const DURATION_PROBE_BUDGET: Duration = Duration::from_secs(30);
+const DURATION_PROBE_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(500);
+const DURATION_PROBE_INTERVAL: Duration = Duration::from_millis(250);
+// A single IPC reply is one short JSON line; anything far larger is not mpv.
+const MAX_IPC_LINE_BYTES: u64 = 64 * 1024;
+
+fn ipc_request(socket_path: &Path, payload: &serde_json::Value, read_timeout: Duration) -> anyhow::Result<serde_json::Value> {
+    use std::io::Read;
+    let mut stream = UnixStream::connect(socket_path)?;
+    let mut line = serde_json::to_string(payload)?;
+    line.push('\n');
+    stream.write_all(line.as_bytes())?;
+    stream.set_read_timeout(Some(read_timeout))?;
+    let mut reader = BufReader::new(stream);
+    let deadline = Instant::now() + read_timeout;
+    // mpv broadcasts events to every client, so the first line on a fresh
+    // connection may be an event rather than the reply to this request.
+    loop {
+        let mut response = String::new();
+        let read = (&mut reader).take(MAX_IPC_LINE_BYTES).read_line(&mut response)?;
+        if read == 0 {
+            anyhow::bail!("mpv closed the IPC connection without replying");
+        }
+        let value: serde_json::Value = serde_json::from_str(&response)?;
+        if value.get("event").is_none() {
+            return Ok(value);
+        }
+        if Instant::now() > deadline {
+            anyhow::bail!("timed out waiting for mpv's reply");
+        }
+    }
+}
+
+fn query_duration(socket_path: &Path, generation: &AtomicU64, expected_generation: u64) -> Option<u64> {
+    let deadline = Instant::now() + DURATION_PROBE_BUDGET;
+    while Instant::now() < deadline {
+        // Give mpv a moment to unload the previous file first, so its duration
+        // is not mistaken for the new one's.
+        std::thread::sleep(DURATION_PROBE_INTERVAL);
+        if generation.load(Ordering::SeqCst) != expected_generation {
+            return None;
+        }
+        let request = serde_json::json!({ "command": ["get_property", "duration"] });
+        if let Ok(resp) = ipc_request(socket_path, &request, DURATION_PROBE_ATTEMPT_TIMEOUT) {
+            if let Some(secs) = resp.get("data").and_then(|d| d.as_f64()) {
+                if secs > 0.0 {
+                    return Some(secs as u64);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn seek_into_long_source(
+    socket_path: &Path,
+    generation: &AtomicU64,
+    expected_generation: u64,
+    known_duration_seconds: Option<u64>,
+    long_source_threshold_seconds: u64,
+) {
+    let duration = match known_duration_seconds {
+        Some(d) => d,
+        None => match query_duration(socket_path, generation, expected_generation) {
+            Some(d) => d,
+            None => return,
+        },
+    };
+    if duration <= long_source_threshold_seconds {
+        return;
+    }
+    if generation.load(Ordering::SeqCst) != expected_generation {
+        return;
+    }
+    let offset = rand_offset_seconds(duration);
+    let seek = serde_json::json!({ "command": ["set_property", "time-pos", offset] });
+    let looping = serde_json::json!({ "command": ["set_property", "loop-file", "inf"] });
+    if ipc_request(socket_path, &seek, DEFAULT_IPC_TIMEOUT).is_ok() {
+        let _ = ipc_request(socket_path, &looping, DEFAULT_IPC_TIMEOUT);
+    }
 }
 
 fn mpv_binary() -> String {
@@ -95,7 +185,7 @@ impl RealMpv {
             .stderr(Stdio::null())
             .spawn()?;
         // Constructed before the wait so an early return still kills mpv via Drop.
-        let mut mpv = Self { socket_path, child };
+        let mut mpv = Self { socket_path, child, generation: Arc::new(AtomicU64::new(0)) };
 
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
@@ -115,47 +205,7 @@ impl RealMpv {
     }
 
     fn send(&self, payload: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        self.send_with_timeout(payload, Duration::from_secs(2))
-    }
-
-    fn send_with_timeout(
-        &self,
-        payload: serde_json::Value,
-        read_timeout: Duration,
-    ) -> anyhow::Result<serde_json::Value> {
-        let mut stream = UnixStream::connect(&self.socket_path)?;
-        let mut line = serde_json::to_string(&payload)?;
-        line.push('\n');
-        stream.write_all(line.as_bytes())?;
-        stream.set_read_timeout(Some(read_timeout))?;
-        let mut reader = BufReader::new(stream);
-        let mut response = String::new();
-        reader.read_line(&mut response)?;
-        Ok(serde_json::from_str(&response)?)
-    }
-
-    // mpv needs a moment to resolve a loaded file's real duration (network sources
-    // in particular), so poll a few times rather than trusting the first reply.
-    // This runs while DaemonState's mutex is held, so each attempt uses a short
-    // timeout instead of the normal 2s: a stalled source should cap the whole
-    // poll at a few seconds, not block every other daemon command for ~42s.
-    fn query_duration(&self) -> Option<u64> {
-        for _ in 0..20 {
-            if let Ok(resp) = self.send_with_timeout(
-                serde_json::json!({ "command": ["get_property", "duration"] }),
-                Duration::from_millis(250),
-            ) {
-                if let Some(data) = resp.get("data") {
-                    if let Some(secs) = data.as_f64() {
-                        if secs > 0.0 {
-                            return Some(secs as u64);
-                        }
-                    }
-                }
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        None
+        ipc_request(&self.socket_path, &payload, DEFAULT_IPC_TIMEOUT)
     }
 }
 
@@ -170,21 +220,31 @@ impl MpvController for RealMpv {
         duration_seconds: Option<u64>,
         long_source_threshold_seconds: u64,
     ) -> anyhow::Result<()> {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.send(serde_json::json!({ "command": ["loadfile", source, "replace"] }))?;
-        // In real usage the daemon never knows the duration up front, so when the
-        // caller didn't supply one, ask mpv itself after the file has loaded.
-        let effective_duration = duration_seconds.or_else(|| self.query_duration());
-        if let Some(duration) = effective_duration {
-            if duration > long_source_threshold_seconds {
-                let offset = rand_offset_seconds(duration);
-                self.send(serde_json::json!({ "command": ["set_property", "time-pos", offset] }))?;
-                self.send(serde_json::json!({ "command": ["set_property", "loop-file", "inf"] }))?;
-            }
-        }
+        // loop-file survives loadfile, so without this reset every source after
+        // a long one would loop forever.
+        self.send(serde_json::json!({ "command": ["set_property", "loop-file", "no"] }))?;
+
+        // Duration discovery can take seconds (yt-dlp resolution), and the caller
+        // holds the daemon's state lock, so it happens off-thread. The thread only
+        // needs the socket path: every IPC request opens its own connection.
+        let socket_path = self.socket_path.clone();
+        let generation_counter = self.generation.clone();
+        std::thread::spawn(move || {
+            seek_into_long_source(
+                &socket_path,
+                &generation_counter,
+                generation,
+                duration_seconds,
+                long_source_threshold_seconds,
+            );
+        });
         Ok(())
     }
 
     fn stop(&mut self) -> anyhow::Result<()> {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.send(serde_json::json!({ "command": ["stop"] }))?;
         Ok(())
     }
@@ -207,8 +267,10 @@ impl MpvController for RealMpv {
     // be confirmed gone here. A quit sent while mpv is still starting up can be
     // lost, which was observed to orphan mpv; fall back to killing it.
     fn quit(&mut self) -> anyhow::Result<()> {
-        let quit_result = self.send_with_timeout(
-            serde_json::json!({ "command": ["quit"] }),
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let quit_result = ipc_request(
+            &self.socket_path,
+            &serde_json::json!({ "command": ["quit"] }),
             Duration::from_millis(500),
         );
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -241,6 +303,145 @@ impl Drop for RealMpv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Stands in for mpv's IPC socket: records every command and answers
+    // get_property duration only once `duration_delay` has passed since the
+    // latest loadfile, like real mpv resolving a network source.
+    struct FakeMpvServer {
+        commands: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        _dir: tempfile::TempDir,
+        socket_path: PathBuf,
+    }
+
+    impl FakeMpvServer {
+        fn start(duration_seconds: f64, duration_delay: Duration) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("fake-mpv.sock");
+            let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+            let commands: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Arc::default();
+            let last_load = Arc::new(std::sync::Mutex::new(Instant::now()));
+            let server_commands = commands.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { return };
+                    let commands = server_commands.clone();
+                    let last_load = last_load.clone();
+                    std::thread::spawn(move || {
+                        let mut writer = stream.try_clone().unwrap();
+                        // Real mpv pushes events to every client; make sure they are skipped.
+                        let _ = writer.write_all(b"{\"event\":\"playback-restart\"}\n");
+                        for line in BufReader::new(stream).lines() {
+                            let Ok(line) = line else { return };
+                            let cmd: serde_json::Value = serde_json::from_str(&line).unwrap();
+                            let args = cmd["command"].as_array().unwrap().clone();
+                            let reply = if args[0] == "get_property" && args[1] == "duration" {
+                                if last_load.lock().unwrap().elapsed() >= duration_delay {
+                                    serde_json::json!({ "data": duration_seconds, "error": "success" })
+                                } else {
+                                    serde_json::json!({ "error": "property unavailable" })
+                                }
+                            } else {
+                                if args[0] == "loadfile" {
+                                    *last_load.lock().unwrap() = Instant::now();
+                                }
+                                commands.lock().unwrap().push(cmd.clone());
+                                serde_json::json!({ "error": "success" })
+                            };
+                            let _ = writer.write_all(format!("{reply}\n").as_bytes());
+                        }
+                    });
+                }
+            });
+            Self { commands, _dir: dir, socket_path }
+        }
+
+        fn mpv(&self) -> RealMpv {
+            let child = Command::new("sleep").arg("60").spawn().unwrap();
+            RealMpv { socket_path: self.socket_path.clone(), child, generation: Arc::default() }
+        }
+
+        fn recorded(&self) -> Vec<serde_json::Value> {
+            self.commands.lock().unwrap().clone()
+        }
+
+        fn wait_for(&self, timeout: Duration, pred: impl Fn(&[serde_json::Value]) -> bool) -> bool {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                if pred(&self.recorded()) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        }
+    }
+
+    fn is_set(cmd: &serde_json::Value, property: &str) -> bool {
+        cmd["command"][0] == "set_property" && cmd["command"][1] == property
+    }
+
+    #[test]
+    fn every_source_start_resets_loop_file_right_after_loadfile() {
+        let server = FakeMpvServer::start(180.0, Duration::ZERO);
+        let mut mpv = server.mpv();
+        mpv.start_source_with_duration("short.mp3", None, 1200).unwrap();
+
+        let recorded = server.recorded();
+        assert_eq!(recorded[0]["command"], serde_json::json!(["loadfile", "short.mp3", "replace"]));
+        assert_eq!(recorded[1]["command"], serde_json::json!(["set_property", "loop-file", "no"]));
+    }
+
+    #[test]
+    fn short_source_after_a_long_one_does_not_inherit_looping() {
+        let server = FakeMpvServer::start(180.0, Duration::ZERO);
+        let mut mpv = server.mpv();
+        mpv.start_source_with_duration("long.mp4", Some(3 * 3600), 1200).unwrap();
+        assert!(server.wait_for(Duration::from_secs(3), |c| c.iter().any(|c| c["command"][2] == "inf")));
+
+        mpv.start_source_with_duration("short.mp3", None, 1200).unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        let recorded = server.recorded();
+        let after_short: Vec<_> = recorded
+            .iter()
+            .skip_while(|c| c["command"][1] != "short.mp3")
+            .collect();
+        assert_eq!(after_short[1]["command"], serde_json::json!(["set_property", "loop-file", "no"]));
+        assert!(
+            !after_short.iter().any(|c| is_set(c, "time-pos") || c["command"][2] == "inf"),
+            "a 3 minute source must not be seeked or looped: {after_short:?}"
+        );
+    }
+
+    #[test]
+    fn long_source_start_returns_before_duration_is_known_then_seeks_in_background() {
+        let server = FakeMpvServer::start(3.0 * 3600.0, Duration::from_millis(1500));
+        let mut mpv = server.mpv();
+        let started = Instant::now();
+        mpv.start_source_with_duration("https://example.com/3h-mix", None, 1200).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500), "start blocked on duration discovery");
+        assert!(!server.recorded().iter().any(|c| is_set(c, "time-pos")));
+
+        assert!(server.wait_for(Duration::from_secs(5), |c| c.iter().any(|c| c["command"][2] == "inf")));
+        let recorded = server.recorded();
+        let seek = recorded.iter().position(|c| is_set(c, "time-pos")).expect("no seek");
+        let looping = recorded.iter().position(|c| c["command"][2] == "inf").unwrap();
+        let reset = recorded.iter().position(|c| c["command"][2] == "no").unwrap();
+        assert!(reset < seek && seek < looping, "wrong order: {recorded:?}");
+    }
+
+    #[test]
+    fn stale_background_probe_does_not_seek_a_newer_source() {
+        let server = FakeMpvServer::start(3.0 * 3600.0, Duration::from_millis(600));
+        let mut mpv = server.mpv();
+        mpv.start_source_with_duration("https://example.com/3h-mix", None, 1200).unwrap();
+        mpv.start_source_with_duration("short.mp3", Some(180), 1200).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let recorded = server.recorded();
+        assert!(
+            !recorded.iter().any(|c| is_set(c, "time-pos") || c["command"][2] == "inf"),
+            "probe for the replaced source acted on the new one: {recorded:?}"
+        );
+    }
 
     fn mpv_available() -> bool {
         std::process::Command::new("mpv").arg("--version").output().is_ok()
