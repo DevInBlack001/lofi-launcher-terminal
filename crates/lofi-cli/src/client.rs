@@ -98,8 +98,9 @@ pub fn classify_source(source: &str) -> anyhow::Result<Option<String>> {
     let title = json.get("title").and_then(|v| v.as_str()).unwrap_or("");
     let description = json.get("description").and_then(|v| v.as_str()).unwrap_or("");
 
-    let config_path = lofi_common::config_path();
-    let config = lofi_common::load_config(&config_path)?;
+    // Package installs never seed config.toml, so fall back to the shipped
+    // default classifier keywords rather than failing on a missing file.
+    let config = lofi_common::load_config_or_default(&lofi_common::config_path())?;
     Ok(lofi_common::classify(&config.classifier, title, description))
 }
 
@@ -177,6 +178,41 @@ mod tests {
         std::env::remove_var("LOFI_DAEMON_BIN");
         drop(winner.join().unwrap());
         result.unwrap();
+    }
+
+    fn fake_yt_dlp_script(dir: &std::path::Path, stdout: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-yt-dlp");
+        let out_file = dir.join("yt-dlp-stdout");
+        std::fs::write(&out_file, stdout).unwrap();
+        let args_file = dir.join("yt-dlp-args");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nfor a; do printf '%s\\n' \"$a\"; done > '{}'\ncat '{}'\n",
+                args_file.display(),
+                out_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn classify_source_uses_default_classifier_when_no_config_file_exists() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let yt_dlp = fake_yt_dlp_script(
+            dir.path(),
+            r#"{"title": "Heavy rain and thunder for sleeping", "description": ""}"#,
+        );
+        std::env::set_var("LOFI_YTDLP_BIN", &yt_dlp);
+        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("empty-config-home"));
+        let result = classify_source("https://example.com/watch?v=abc");
+        std::env::remove_var("LOFI_YTDLP_BIN");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert_eq!(result.unwrap(), Some("rainy-day".to_string()));
     }
 
     #[test]
