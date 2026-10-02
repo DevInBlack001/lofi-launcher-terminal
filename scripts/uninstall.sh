@@ -5,6 +5,10 @@ set -eu
 # hardcoded, so this removes exactly what install.sh put in place.
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
+if [ -n "${XDG_CONFIG_HOME:-}" ] && ! case "$XDG_CONFIG_HOME" in /*) true;; *) false;; esac; then
+    echo "Warning: XDG_CONFIG_HOME='$XDG_CONFIG_HOME' is not absolute, treating as unset"
+    XDG_CONFIG_HOME=""
+fi
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lofi-launcher"
 MARKER_START="# >>> lofi-launcher-terminal >>>"
 MARKER_END="# <<< lofi-launcher-terminal <<<"

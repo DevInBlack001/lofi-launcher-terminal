@@ -7,6 +7,10 @@ set -eu
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
+if [ -n "${XDG_CONFIG_HOME:-}" ] && ! case "$XDG_CONFIG_HOME" in /*) true;; *) false;; esac; then
+    echo "Warning: XDG_CONFIG_HOME='$XDG_CONFIG_HOME' is not absolute, treating as unset"
+    XDG_CONFIG_HOME=""
+fi
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lofi-launcher"
 # Markers bracket the shell-rc block we add below, so a second install run
 # can detect it's already there instead of duplicating it.
@@ -124,7 +128,13 @@ fi
 # Kept in sync with crates/lofi-daemon/src/mpv.rs's MPRIS_SCRIPT_CANDIDATES
 # and user-config-dir fallback, since this is a separate shell-side check
 # only used to print an install-time hint, not the actual runtime detection.
-USER_MPV_SCRIPTS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/mpv/scripts"
+_XDG_FOR_MPV="${XDG_CONFIG_HOME:-}"
+if [ -z "$_XDG_FOR_MPV" ]; then
+    _XDG_FOR_MPV="$HOME/.config"
+elif ! case "$_XDG_FOR_MPV" in /*) true;; *) false;; esac; then
+    _XDG_FOR_MPV="$HOME/.config"
+fi
+USER_MPV_SCRIPTS_DIR="$_XDG_FOR_MPV/mpv/scripts"
 if [ ! -e /usr/share/mpv/scripts/mpris.so ] \
     && [ ! -e /usr/lib/mpv/scripts/mpris.so ] \
     && [ ! -e /usr/local/share/mpv/scripts/mpris.so ] \

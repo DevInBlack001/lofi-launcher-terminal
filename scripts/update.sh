@@ -32,8 +32,16 @@ echo "Updated binaries in $BIN_DIR. Existing config and shell integration are pr
 # name only, same as uninstall.sh.
 if pkill -u "$(id -u)" -x lofi-daemon 2>/dev/null; then
     # Same safety net as uninstall.sh for an old daemon build that lacked a
-    # SIGTERM handler and would orphan its mpv.
-    sleep 1
+    # SIGTERM handler and would orphan its mpv. Wait briefly for the daemon to
+    # exit, but also have a fallback to kill any orphaned mpv after a timeout
+    # to minimize the race window.
+    KILL_DEADLINE=$(($(date +%s) + 1))
+    while [ "$(date +%s)" -lt "$KILL_DEADLINE" ]; do
+        if ! pgrep -u "$(id -u)" -x lofi-daemon >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.05
+    done
     pkill -u "$(id -u)" -f -- "--input-ipc-server=.*lofi-mpv\.sock" 2>/dev/null || true
     echo "Restarted lofi-daemon to pick up the update: the old daemon was stopped, so playback"
     echo "has stopped. The new daemon starts on the next lofi command and playback resumes when"
