@@ -129,8 +129,12 @@ impl<M: MpvController> DaemonState<M> {
                 if len == 0 {
                     return Response::Error(format!("mood '{}' has no sources configured", self.current_mood));
                 }
-                self.current_index = (self.current_index + 1) % len;
-                self.start_current_mood()
+                if self.session_count > 0 {
+                    self.current_index = (self.current_index + 1) % len;
+                    self.start_current_mood()
+                } else {
+                    Response::Ok
+                }
             }
             Command::Pause => match self.mpv.pause() {
                 Ok(()) => {
@@ -432,6 +436,15 @@ mod tests {
         state.handle(Command::Register);
         assert!(!state.mpv.paused, "new source must not inherit the old pause flag");
         assert_eq!(status_flags(&mut state), (true, false));
+    }
+
+    #[test]
+    fn next_with_no_registered_session_does_not_start_playback_or_advance_index() {
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        let resp = state.handle(Command::Next);
+        assert!(matches!(resp, Response::Ok), "unexpected {resp:?}");
+        assert!(state.mpv.started.is_empty(), "must not talk to mpv with no registered session");
+        assert_eq!(state.current_index, 0, "must not advance the index with no registered session");
     }
 
     #[test]
