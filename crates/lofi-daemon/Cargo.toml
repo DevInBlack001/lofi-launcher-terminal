@@ -8,7 +8,6 @@ lofi-common = { path = "../lofi-common" }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 ctrlc = { version = "3", features = ["termination"] }
-fs2 = "0.4"
 libc = "0.2"
 
 [dev-dependencies]
