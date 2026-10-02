@@ -13,12 +13,7 @@ fn runtime_dir() -> std::path::PathBuf {
 }
 
 fn main() -> anyhow::Result<()> {
-    let config_path = lofi_common::config_path();
-    let config = if config_path.exists() {
-        lofi_common::load_config(&config_path)?
-    } else {
-        toml::from_str(lofi_common::default_config_toml())?
-    };
+    let config = lofi_common::load_config_or_default(&lofi_common::config_path())?;
 
     let mpv_binary_check = std::process::Command::new(std::env::var("LOFI_MPV_BIN").unwrap_or_else(|_| "mpv".to_string()))
         .arg("--version")

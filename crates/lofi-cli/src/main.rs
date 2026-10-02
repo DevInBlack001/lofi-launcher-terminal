@@ -29,6 +29,8 @@ enum Cmd {
     Status,
     /// List the configured mood names
     Moods,
+    /// Re-read config.toml from disk without restarting the daemon or stopping playback
+    Reload,
     /// Open an interactive mood picker
     Tui,
     /// Classify a source into a mood (or use an explicit mood) and add it to the config
@@ -104,6 +106,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Resume => DaemonCommand::Resume,
         Cmd::Status => DaemonCommand::Status,
         Cmd::Moods => DaemonCommand::Moods,
+        Cmd::Reload => DaemonCommand::Reload,
         Cmd::Tui => unreachable!("handled above"),
         Cmd::Add { .. } => unreachable!("handled above"),
     };

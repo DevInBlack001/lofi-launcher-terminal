@@ -45,13 +45,38 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<Config> {
     Ok(cfg)
 }
 
-pub fn save_config(path: &std::path::Path, config: &Config) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+pub fn load_config_or_default(path: &std::path::Path) -> anyhow::Result<Config> {
+    if path.exists() {
+        load_config(path)
+    } else {
+        Ok(toml::from_str(default_config_toml())?)
     }
+}
+
+pub fn save_config(path: &std::path::Path, config: &Config) -> anyhow::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path {} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(parent)?;
     let text = toml::to_string_pretty(config)?;
-    std::fs::write(path, text)?;
-    Ok(())
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("config path {} has no file name", path.display()))?;
+    // Same directory as the target so the rename stays on one filesystem and is
+    // atomic: a crash mid-write leaves the old config intact, never a truncated one.
+    let tmp_path = parent.join(format!(".{}.tmp-{}", file_name.to_string_lossy(), std::process::id()));
+    let write_result = (|| -> anyhow::Result<()> {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    write_result
 }
 
 #[cfg(test)]
@@ -75,6 +100,31 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         write!(f, "{}", default_config_toml()).unwrap();
         let cfg = load_config(&path).unwrap();
+        assert_eq!(cfg.default_mood, "code-and-chill");
+    }
+
+    #[test]
+    fn save_config_writes_atomically_without_leaving_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        let mut cfg: Config = toml::from_str(default_config_toml()).unwrap();
+        cfg.moods.get_mut("ambient").unwrap().sources.push("/music/a.flac".to_string());
+        save_config(&path, &cfg).unwrap();
+        save_config(&path, &cfg).unwrap();
+
+        let reloaded = load_config(&path).unwrap();
+        assert_eq!(reloaded.moods["ambient"].sources, vec!["/music/a.flac".to_string()]);
+        let entries: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(entries, vec!["config.toml".to_string()]);
+    }
+
+    #[test]
+    fn load_config_or_default_falls_back_when_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = load_config_or_default(&dir.path().join("missing.toml")).unwrap();
         assert_eq!(cfg.default_mood, "code-and-chill");
     }
 

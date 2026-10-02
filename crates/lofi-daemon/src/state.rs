@@ -61,6 +61,14 @@ impl<M: MpvController> DaemonState<M> {
         self.known_duration_seconds = seconds;
     }
 
+    fn replace_config(&mut self, config: Config) {
+        self.config = config;
+        if !self.config.moods.contains_key(&self.current_mood) {
+            self.current_mood = self.config.default_mood.clone();
+            self.current_index = 0;
+        }
+    }
+
     fn valid_mood_names(&self) -> String {
         self.config.moods.keys().cloned().collect::<Vec<_>>().join(", ")
     }
@@ -140,18 +148,16 @@ impl<M: MpvController> DaemonState<M> {
                 }
             }
             Command::Moods => Response::Moods(self.config.moods.keys().cloned().collect()),
-            Command::Reload => Response::Ok,
+            Command::Reload => match lofi_common::load_config_or_default(&lofi_common::config_path()) {
+                Ok(config) => {
+                    self.replace_config(config);
+                    Response::Ok
+                }
+                Err(e) => Response::Error(format!("could not reload config: {e}")),
+            },
             Command::Add { source, mood } => {
                 let target_mood = match mood {
-                    Some(name) => {
-                        if !self.config.moods.contains_key(&name) {
-                            return Response::Error(format!(
-                                "unknown mood '{name}', valid moods: {}",
-                                self.valid_mood_names()
-                            ));
-                        }
-                        name
-                    }
+                    Some(name) => name,
                     None => {
                         return Response::Error(
                             "could not classify source without metadata; pass --mood explicitly \
@@ -160,15 +166,27 @@ impl<M: MpvController> DaemonState<M> {
                         );
                     }
                 };
-                self.config
-                    .moods
-                    .get_mut(&target_mood)
-                    .expect("checked above")
-                    .sources
-                    .push(source);
-                if let Err(e) = lofi_common::save_config(&lofi_common::config_path(), &self.config) {
+                // The daemon is long-lived, so its in-memory config is likely stale
+                // relative to hand edits; append to what is on disk right now.
+                let path = lofi_common::config_path();
+                let mut fresh = match lofi_common::load_config_or_default(&path) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        return Response::Error(format!(
+                            "could not read {} (left untouched): {e}",
+                            path.display()
+                        ))
+                    }
+                };
+                let Some(mood_entry) = fresh.moods.get_mut(&target_mood) else {
+                    let valid = fresh.moods.keys().cloned().collect::<Vec<_>>().join(", ");
+                    return Response::Error(format!("unknown mood '{target_mood}', valid moods: {valid}"));
+                };
+                mood_entry.sources.push(source);
+                if let Err(e) = lofi_common::save_config(&path, &fresh) {
                     return Response::Error(e.to_string());
                 }
+                self.replace_config(fresh);
                 Response::Classified(target_mood)
             }
         }
@@ -297,7 +315,7 @@ mod tests {
 
     #[test]
     fn add_with_explicit_mood_appends_source_and_reports_classified_mood() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
@@ -359,9 +377,175 @@ mod tests {
         assert!(!state.mpv.loop_file_requested, "a 3 minute source must not request loop-file");
     }
 
+    fn write_config_to(dir: &std::path::Path, config: &Config) -> std::path::PathBuf {
+        let path = dir.join("lofi-launcher").join("config.toml");
+        lofi_common::save_config(&path, config).unwrap();
+        path
+    }
+
+    #[test]
+    fn reload_picks_up_sources_edited_on_disk() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        let mut edited = test_config();
+        edited.moods.get_mut("deep-focus").unwrap().sources.push("hand-edited.mp3".to_string());
+        write_config_to(scratch_dir.path(), &edited);
+
+        let resp = state.handle(Command::Reload);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(matches!(resp, Response::Ok), "unexpected {resp:?}");
+        assert_eq!(state.mood_sources("deep-focus"), vec!["hand-edited.mp3".to_string()]);
+    }
+
+    #[test]
+    fn reload_falls_back_to_default_config_when_file_is_missing() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        let resp = state.handle(Command::Reload);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(matches!(resp, Response::Ok), "unexpected {resp:?}");
+        assert!(state.mood_sources("code-and-chill").is_empty(), "default config ships empty moods");
+    }
+
+    #[test]
+    fn reload_resets_to_default_mood_when_current_mood_was_removed() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        state.handle(Command::Mood("deep-focus".to_string()));
+        let mut edited = test_config();
+        edited.moods.remove("deep-focus");
+        write_config_to(scratch_dir.path(), &edited);
+
+        state.handle(Command::Reload);
+        let status = state.handle(Command::Status);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        match status {
+            Response::Status { mood, .. } => assert_eq!(mood, "code-and-chill"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(state.current_index, 0);
+    }
+
+    #[test]
+    fn reload_keeps_sessions_and_playback_running() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        write_config_to(scratch_dir.path(), &test_config());
+
+        state.handle(Command::Reload);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert_eq!(state.session_count(), 1);
+        assert!(state.playing);
+        assert!(!state.mpv.stopped, "reload must not stop playback");
+    }
+
+    #[test]
+    fn reload_with_malformed_config_returns_error_and_keeps_old_config() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+        let path = scratch_dir.path().join("lofi-launcher").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "this is = = not toml").unwrap();
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        let resp = state.handle(Command::Reload);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(matches!(resp, Response::Error(_)), "unexpected {resp:?}");
+        assert_eq!(state.mood_sources("code-and-chill"), vec!["a.mp3".to_string()]);
+    }
+
+    #[test]
+    fn add_rereads_config_from_disk_and_preserves_hand_edits() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+
+        // Daemon starts with the stale in-memory snapshot...
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        // ...then the user hand-edits the file while the daemon keeps running.
+        let mut edited = test_config();
+        edited.moods.get_mut("code-and-chill").unwrap().sources.push("hand-edited.mp3".to_string());
+        edited.long_source_minutes = 45;
+        let path = write_config_to(scratch_dir.path(), &edited);
+
+        let resp = state.handle(Command::Add {
+            source: "https://example.com/new.mp4".to_string(),
+            mood: Some("deep-focus".to_string()),
+        });
+        let written = lofi_common::load_config(&path);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(matches!(resp, Response::Classified(ref m) if m == "deep-focus"), "unexpected {resp:?}");
+
+        let written = written.unwrap();
+        assert_eq!(
+            written.moods["code-and-chill"].sources,
+            vec!["a.mp3".to_string(), "hand-edited.mp3".to_string()],
+            "hand edit was clobbered"
+        );
+        assert_eq!(written.long_source_minutes, 45);
+        assert_eq!(written.moods["deep-focus"].sources, vec!["https://example.com/new.mp4".to_string()]);
+        // In-memory view must match disk without needing a separate reload.
+        assert_eq!(state.mood_sources("code-and-chill"), written.moods["code-and-chill"].sources);
+        assert_eq!(state.mood_sources("deep-focus"), written.moods["deep-focus"].sources);
+    }
+
+    #[test]
+    fn add_accepts_a_mood_that_only_exists_in_the_on_disk_config() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        let mut edited = test_config();
+        edited.moods.insert("night-drive".to_string(), Mood { sources: vec![] });
+        write_config_to(scratch_dir.path(), &edited);
+
+        let resp = state.handle(Command::Add {
+            source: "drive.mp3".to_string(),
+            mood: Some("night-drive".to_string()),
+        });
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(matches!(resp, Response::Classified(ref m) if m == "night-drive"), "unexpected {resp:?}");
+        assert_eq!(state.mood_sources("night-drive"), vec!["drive.mp3".to_string()]);
+    }
+
+    #[test]
+    fn add_with_malformed_on_disk_config_refuses_to_overwrite_it() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+        let path = scratch_dir.path().join("lofi-launcher").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "this is = = not toml").unwrap();
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        let resp = state.handle(Command::Add {
+            source: "x.mp3".to_string(),
+            mood: Some("deep-focus".to_string()),
+        });
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(matches!(resp, Response::Error(_)), "unexpected {resp:?}");
+        assert_eq!(on_disk, "this is = = not toml");
+    }
+
     #[test]
     fn add_with_unknown_explicit_mood_returns_error() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let scratch_dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
 
