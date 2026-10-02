@@ -68,22 +68,37 @@ pub fn load_config_or_default(path: &std::path::Path) -> anyhow::Result<Config> 
 
 pub fn save_config(path: &std::path::Path, config: &Config) -> anyhow::Result<()> {
     use std::io::Write;
-    let parent = path
+    // symlink_metadata (not metadata) inspects the link itself rather than following
+    // it, so a symlinked config.toml (common with dotfiles managed via Stow) is
+    // detected here instead of being silently replaced by a plain file below.
+    let is_symlink = std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    // Resolve through the symlink so the write and rename land on whatever the link
+    // actually points to, leaving the symlink itself untouched.
+    let target = if is_symlink { std::fs::canonicalize(path)? } else { path.to_path_buf() };
+    let parent = target
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("config path {} has no parent directory", path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("config path {} has no parent directory", target.display()))?;
     std::fs::create_dir_all(parent)?;
     let text = toml::to_string_pretty(config)?;
-    let file_name = path
+    let file_name = target
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("config path {} has no file name", path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("config path {} has no file name", target.display()))?;
     // Same directory as the target so the rename stays on one filesystem and is
     // atomic: a crash mid-write leaves the old config intact, never a truncated one.
     let tmp_path = parent.join(format!(".{}.tmp-{}", file_name.to_string_lossy(), std::process::id()));
+    // Carry over the existing file's permission bits so a config with non-default
+    // permissions (e.g. group-readable) doesn't change after a rewrite.
+    let existing_permissions = std::fs::metadata(&target).ok().map(|m| m.permissions());
     let write_result = (|| -> anyhow::Result<()> {
         let mut file = std::fs::File::create(&tmp_path)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&tmp_path, path)?;
+        if let Some(perms) = existing_permissions {
+            std::fs::set_permissions(&tmp_path, perms)?;
+        }
+        std::fs::rename(&tmp_path, &target)?;
         Ok(())
     })();
     if write_result.is_err() {
@@ -145,6 +160,41 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(entries, vec!["config.toml".to_string()]);
+    }
+
+    #[test]
+    fn save_config_through_symlink_writes_to_real_target_and_leaves_symlink_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_target = dir.path().join("real-config.toml");
+        std::fs::write(&real_target, "placeholder").unwrap();
+        let symlink_path = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&real_target, &symlink_path).unwrap();
+
+        let cfg: Config = toml::from_str(default_config_toml()).unwrap();
+        save_config(&symlink_path, &cfg).unwrap();
+
+        let meta = std::fs::symlink_metadata(&symlink_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "save_config must not replace the symlink itself");
+        let resolved = std::fs::read_link(&symlink_path).unwrap();
+        assert_eq!(resolved, real_target);
+
+        let contents = std::fs::read_to_string(&real_target).unwrap();
+        assert!(contents.contains("default_mood"), "real target was not updated: {contents}");
+    }
+
+    #[test]
+    fn save_config_preserves_existing_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "placeholder").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let cfg: Config = toml::from_str(default_config_toml()).unwrap();
+        save_config(&path, &cfg).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "save_config must preserve pre-existing permission bits");
     }
 
     #[test]
