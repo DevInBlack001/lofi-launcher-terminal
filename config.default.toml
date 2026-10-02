@@ -20,10 +20,14 @@ sources = []
 [moods.ambient]
 sources = []
 
-# Keywords used by `lofi add` to classify a new source's title into a mood.
-# The first mood whose keyword list matches (case-insensitively) wins.
+# Keywords used by `lofi add` to classify a new source into a mood.
+# Each mood is scored by counting case-insensitive keyword occurrences in the
+# source's title (weighted 3x) and description (1x); the highest score wins,
+# with ties going to the alphabetically first mood. Matching is by plain
+# substring, so a short keyword also hits inside longer words (e.g. "rain"
+# in "training", "space" in "workspace").
 [classifier]
-code-and-chill = ["code", "study", "focus", "synthwave", "productivity"]
+code-and-chill = ["code", "study", "synthwave", "productivity"]
 deep-focus = ["deep focus", "concentration", "flow state"]
 chill-beats = ["chill", "beats", "hip hop", "lofi hip hop"]
 rainy-day = ["rain", "storm", "thunder", "cozy"]

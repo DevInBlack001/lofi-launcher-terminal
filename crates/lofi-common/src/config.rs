@@ -94,6 +94,19 @@ mod tests {
     }
 
     #[test]
+    fn default_classifier_sends_deep_focus_titles_to_deep_focus() {
+        let cfg: Config = toml::from_str(default_config_toml()).unwrap();
+        assert_eq!(
+            crate::classify(&cfg.classifier, "Deep Focus Music - 3 hours", ""),
+            Some("deep-focus".to_string())
+        );
+        assert_eq!(
+            crate::classify(&cfg.classifier, "Synthwave mix to code to", ""),
+            Some("code-and-chill".to_string())
+        );
+    }
+
+    #[test]
     fn load_config_reads_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
