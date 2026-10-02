@@ -1,6 +1,6 @@
 pkgbase = lofi-launcher-terminal
 	pkgdesc = Play mood-based lofi music in the background whenever a terminal or TTY session is open
-	pkgver = 0.2.0
+	pkgver = 0.3.0
 	pkgrel = 1
 	url = https://github.com/DevInBlack001/lofi-launcher-terminal
 	arch = x86_64
@@ -10,7 +10,7 @@ pkgbase = lofi-launcher-terminal
 	depends = mpv
 	optdepends = mpv-mpris: expose now-playing track info over MPRIS for widgets like quickshell or playerctl
 	optdepends = yt-dlp: required for lofi add to classify a URL source and for mpv to stream URL sources at all
-	source = lofi-launcher-terminal-0.2.0.tar.gz::https://github.com/DevInBlack001/lofi-launcher-terminal/archive/v0.2.0.tar.gz
-	sha256sums = a3139cfb6a4f971bbd6a1436dabf1ecfdad3062b921be1479ef8f59c1bbeb3ee
+	source = lofi-launcher-terminal-0.3.0.tar.gz::https://github.com/DevInBlack001/lofi-launcher-terminal/archive/v0.3.0.tar.gz
+	sha256sums = SKIP
 
 pkgname = lofi-launcher-terminal

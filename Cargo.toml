@@ -6,7 +6,7 @@ members = ["crates/lofi-common", "crates/lofi-daemon", "crates/lofi-cli"]
 # single source of truth for the project's version across Cargo.toml and
 # PKGBUILD.
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
