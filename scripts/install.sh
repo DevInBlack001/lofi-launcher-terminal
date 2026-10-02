@@ -51,12 +51,19 @@ if [ -n "$RC_FILE" ]; then
     if [ -f "$RC_FILE" ] && grep -qF "$MARKER_START" "$RC_FILE"; then
         echo "Shell integration already present in $RC_FILE"
     else
+        # The binary path is baked in absolute, not left as a bare "lofi",
+        # since this block can end up running before any PATH additions
+        # elsewhere in the rc file.
         {
             echo "$MARKER_START"
-            cat "$REPO_DIR/scripts/lofi-launcher.sh.in"
+            sed "/^#/! s#\\blofi\\b#$BIN_DIR/lofi#g" "$REPO_DIR/scripts/lofi-launcher.sh.in"
             echo "$MARKER_END"
         } >> "$RC_FILE"
         echo "Added shell integration to $RC_FILE"
+        echo "Note: if anything earlier in $RC_FILE execs into tmux, screen, or another"
+        echo "shell (a bare 'tmux' line is common), this block won't run for a terminal"
+        echo "that attaches there. Move the block (between the >>> and <<< markers) to"
+        echo "before that line by hand, keeping it after any 'interactive shell only' check."
     fi
 fi
 

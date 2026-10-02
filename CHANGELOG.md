@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-10-02
+
+### Fixed
+
+- `scripts/install.sh`'s installed shell snippet now uses the absolute path
+  to the `lofi` binary instead of a bare `lofi`, since the snippet can end up
+  running before any `PATH` additions elsewhere in the rc file.
+- `scripts/install.sh` now warns at install time if anything earlier in the
+  rc file execs into tmux, screen, or another shell (a bare `tmux` line is
+  common), since the installed block can never run for a terminal that
+  attaches there, meaning `lofi register` and its `EXIT` trap never fire,
+  which can silently leak the session count and leave music playing after
+  every tracked terminal is closed. The block must be placed before that
+  line by hand, after any "interactive shell only" check, for it to work.
+
 ## [0.1.0] - 2026-10-02
 
 ### Added

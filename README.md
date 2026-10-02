@@ -108,3 +108,11 @@ Linux, `mpv` installed and on `PATH` (or pointed to via `LOFI_MPV_BIN`). `yt-dlp
 ## Now-playing widgets (quickshell, playerctl, waybar)
 
 Install `mpv-mpris` (available in most distro repos, or as an optdepend on Arch) so mpv publishes track title and play/pause state over MPRIS. Any standard MPRIS-reading widget then sees and can control the current lofi track. This is optional: playback works the same without it, only widget visibility is affected. If your `mpv-mpris` script lives somewhere nonstandard, point to it with `LOFI_MPV_MPRIS_SCRIPT=/path/to/mpris.so`.
+
+## Versioning (for maintainers)
+
+`version.json` is the single source of truth for the project's version. To
+bump it, edit `version.json` and run `./scripts/sync-version.sh`, which
+propagates the version into `Cargo.toml` (every crate inherits it via
+`version.workspace = true`) and `PKGBUILD`, rebuilds `Cargo.lock`, and
+regenerates `.SRCINFO`. Review the resulting diff, then commit.
