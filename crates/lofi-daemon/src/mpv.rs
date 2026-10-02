@@ -120,10 +120,10 @@ fn seek_into_long_source(
     if duration <= long_source_threshold_seconds {
         return;
     }
-    if generation.load(Ordering::SeqCst) != expected_generation {
+    if !random_seek_makes_sense(socket_path) {
         return;
     }
-    if !random_seek_makes_sense(socket_path) {
+    if generation.load(Ordering::SeqCst) != expected_generation {
         return;
     }
     let offset = rand_offset_seconds(duration);
@@ -197,7 +197,12 @@ impl RealMpv {
         }
         let ipc_arg = format!("--input-ipc-server={}", socket_path.display());
         let mut command = Command::new(mpv_binary());
-        command.arg("--idle").arg("--no-video").arg(ipc_arg);
+        command
+            .arg("--idle")
+            .arg("--no-video")
+            .arg("--keep-open=no")
+            .arg("--loop-playlist=no")
+            .arg(ipc_arg);
         match find_mpris_script() {
             Some(script) => {
                 command.arg(format!("--script={script}"));
@@ -626,6 +631,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generation_bump_after_duration_probe_prevents_stale_seek() {
+        let server = FakeMpvServer::start(3.0 * 3600.0, Duration::from_millis(800));
+        let generation = Arc::new(AtomicU64::new(1));
+        let gen_clone = generation.clone();
+        let socket_path = server.socket_path.clone();
+
+        let probe_thread = std::thread::spawn(move || {
+            seek_into_long_source(&socket_path, &gen_clone, 1, None, 1200);
+        });
+
+        std::thread::sleep(Duration::from_millis(400));
+        generation.store(2, Ordering::SeqCst);
+
+        probe_thread.join().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        assert!(
+            !server.recorded().iter().any(|c| is_set(c, "time-pos")),
+            "generation bump during probe should prevent the seek: {:?}",
+            server.recorded()
+        );
+    }
+
     // Real mpv on a YouTube live stream reports the time since the broadcast
     // started as an ever-growing duration (72054s was observed) and seekable=true.
     #[test]
@@ -730,6 +759,25 @@ mod tests {
     fn static_candidates_include_real_world_distro_paths() {
         assert!(MPRIS_SCRIPT_CANDIDATES.contains(&"/usr/lib/mpv-mpris/mpris.so"));
         assert!(MPRIS_SCRIPT_CANDIDATES.contains(&"/etc/mpv/scripts/mpris.so"));
+    }
+
+    #[test]
+    fn spawn_includes_keep_open_and_loop_playlist_overrides_to_guarantee_auto_advance() {
+        let mut cmd = Command::new(mpv_binary());
+        cmd.arg("--idle")
+            .arg("--no-video")
+            .arg("--keep-open=no")
+            .arg("--loop-playlist=no")
+            .arg("--input-ipc-server=/tmp/test.sock");
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        assert!(
+            args.contains(&"--keep-open=no".to_string()),
+            "spawn must include --keep-open=no to override user mpv.conf, got args: {args:?}"
+        );
+        assert!(
+            args.contains(&"--loop-playlist=no".to_string()),
+            "spawn must include --loop-playlist=no to override user mpv.conf, got args: {args:?}"
+        );
     }
 
     #[test]
