@@ -1,3 +1,4 @@
+pub mod end_of_file;
 pub mod mpv;
 pub mod server;
 pub mod state;

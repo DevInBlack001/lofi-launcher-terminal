@@ -1,3 +1,4 @@
+use lofi_daemon::end_of_file;
 use lofi_daemon::mpv::{MpvController, RealMpv};
 use lofi_daemon::server;
 use lofi_daemon::state::DaemonState;
@@ -58,6 +59,10 @@ fn main() -> anyhow::Result<()> {
 
     let mpv = RealMpv::spawn(mpv_socket)?;
     let state = Arc::new(Mutex::new(DaemonState::new(config, mpv)));
+    // Playback itself works without it, so a failure here only costs auto-advance.
+    if let Err(e) = end_of_file::spawn_end_of_file_listener(state.clone()) {
+        eprintln!("could not subscribe to mpv events, sources will not auto-advance: {e}");
+    }
 
     // A raw SIGTERM/SIGINT skips Drop, so without this handler mpv is
     // orphaned (reparented to init) and keeps playing after the daemon dies.

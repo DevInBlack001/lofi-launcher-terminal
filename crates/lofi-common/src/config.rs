@@ -15,6 +15,10 @@ fn default_long_source_minutes() -> u32 {
     DEFAULT_LONG_SOURCE_MINUTES
 }
 
+fn default_loop_playback() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub default_mood: String,
@@ -23,6 +27,8 @@ pub struct Config {
     pub classifier: BTreeMap<String, Vec<String>>,
     #[serde(default = "default_long_source_minutes")]
     pub long_source_minutes: u32,
+    #[serde(default = "default_loop_playback")]
+    pub loop_playback: bool,
 }
 
 pub fn default_config_toml() -> &'static str {
@@ -132,6 +138,15 @@ mod tests {
             crate::classify(&cfg.classifier, "Synthwave mix to code to", ""),
             Some("code-and-chill".to_string())
         );
+    }
+
+    #[test]
+    fn loop_playback_defaults_to_on_when_absent() {
+        let cfg: Config = toml::from_str("default_mood = \"ambient\"\n[moods.ambient]\nsources = []\n").unwrap();
+        assert!(cfg.loop_playback);
+        let cfg: Config =
+            toml::from_str("default_mood = \"ambient\"\nloop_playback = false\n[moods.ambient]\nsources = []\n").unwrap();
+        assert!(!cfg.loop_playback);
     }
 
     #[test]

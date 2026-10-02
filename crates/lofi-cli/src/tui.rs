@@ -7,14 +7,22 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Parag
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 
+#[derive(Default)]
+struct DaemonView {
+    mood: String,
+    state_label: &'static str,
+    loop_playback: bool,
+}
+
 // The daemon is the source of truth for playback state (e.g. a mood with no
 // sources never starts), so re-ask it rather than guessing from the command sent.
-fn refresh_status(socket: &Path, current_mood: &mut String, state_label: &mut &'static str) {
-    if let Ok(lofi_common::Response::Status { mood, playing, paused, .. }) =
+fn refresh_status(socket: &Path, view: &mut DaemonView) {
+    if let Ok(lofi_common::Response::Status { mood, playing, paused, loop_playback, .. }) =
         client::send_command(socket, &lofi_common::Command::Status)
     {
-        *current_mood = mood;
-        *state_label = crate::playback_state_label(playing, paused);
+        view.mood = mood;
+        view.state_label = crate::playback_state_label(playing, paused);
+        view.loop_playback = loop_playback;
     }
 }
 
@@ -32,9 +40,8 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
         other => anyhow::bail!("unexpected response listing moods: {other:?}"),
     };
 
-    let mut current_mood = "unknown".to_string();
-    let mut state_label = "unknown";
-    refresh_status(&socket, &mut current_mood, &mut state_label);
+    let mut view = DaemonView { mood: "unknown".to_string(), state_label: "unknown", ..Default::default() };
+    refresh_status(&socket, &mut view);
     // Cleared by the next successful action rather than on a timer.
     let mut last_error: Option<String> = None;
 
@@ -56,7 +63,12 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                 ])
                 .split(frame.area());
 
-            let header = Paragraph::new(format!("mood: {current_mood}  ({state_label})"))
+            let header = Paragraph::new(format!(
+                "mood: {}  ({})  loop: {}",
+                view.mood,
+                view.state_label,
+                crate::on_off_label(view.loop_playback)
+            ))
                 .block(Block::default().borders(Borders::ALL).title("lofi").padding(Padding::horizontal(1)));
             frame.render_widget(header, chunks[0]);
 
@@ -74,7 +86,7 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                 Some(msg) => Paragraph::new(format!("error: {msg}"))
                     .style(Style::default().add_modifier(Modifier::BOLD))
                     .block(Block::default().borders(Borders::ALL).title("error").padding(Padding::horizontal(1))),
-                None => Paragraph::new("enter: select  p: pause  r: resume  n: next  q: quit")
+                None => Paragraph::new("enter: select  p: pause  r: resume  n: next  l: loop  q: quit")
                     .block(Block::default().borders(Borders::ALL).title("keys").padding(Padding::horizontal(1))),
             };
             frame.render_widget(footer, chunks[2]);
@@ -104,19 +116,24 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                     KeyCode::Enter => {
                         let name = moods[selected].clone();
                         last_error = action_error(client::send_command(&socket, &lofi_common::Command::Mood(name)));
-                        refresh_status(&socket, &mut current_mood, &mut state_label);
+                        refresh_status(&socket, &mut view);
                     }
                     KeyCode::Char('p') => {
                         last_error = action_error(client::send_command(&socket, &lofi_common::Command::Pause));
-                        refresh_status(&socket, &mut current_mood, &mut state_label);
+                        refresh_status(&socket, &mut view);
                     }
                     KeyCode::Char('r') => {
                         last_error = action_error(client::send_command(&socket, &lofi_common::Command::Resume));
-                        refresh_status(&socket, &mut current_mood, &mut state_label);
+                        refresh_status(&socket, &mut view);
                     }
                     KeyCode::Char('n') => {
                         last_error = action_error(client::send_command(&socket, &lofi_common::Command::Next));
-                        refresh_status(&socket, &mut current_mood, &mut state_label);
+                        refresh_status(&socket, &mut view);
+                    }
+                    KeyCode::Char('l') => {
+                        let toggled = lofi_common::Command::SetLoop(!view.loop_playback);
+                        last_error = action_error(client::send_command(&socket, &toggled));
+                        refresh_status(&socket, &mut view);
                     }
                     KeyCode::Char('q') => break Ok(()),
                     _ => {}

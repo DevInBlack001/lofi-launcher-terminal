@@ -1,6 +1,6 @@
 mod client;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use lofi_common::Command as DaemonCommand;
 
 #[derive(Parser)]
@@ -31,6 +31,8 @@ enum Cmd {
     Moods,
     /// Re-read config.toml from disk without restarting the daemon or stopping playback
     Reload,
+    /// Turn auto-advance on or off: when on, a finished source moves on to the next one in the mood
+    Loop { state: OnOff },
     /// Open an interactive mood picker
     Tui,
     /// Classify a source into a mood (or use an explicit mood) and add it to the config
@@ -41,10 +43,24 @@ enum Cmd {
     },
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
+}
+
 fn runtime_socket() -> std::path::PathBuf {
     let run_dir = lofi_common::xdg_absolute_dir("XDG_RUNTIME_DIR")
         .expect("XDG_RUNTIME_DIR must be set to an absolute path; lofi targets Linux session environments");
     run_dir.join("lofi-daemon.sock")
+}
+
+pub(crate) fn on_off_label(enabled: bool) -> &'static str {
+    if enabled {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 pub(crate) fn playback_state_label(playing: bool, paused: bool) -> &'static str {
@@ -61,10 +77,11 @@ fn print_response(resp: lofi_common::Response) {
     match resp {
         lofi_common::Response::Ok => println!("ok"),
         lofi_common::Response::Error(msg) => eprintln!("error: {msg}"),
-        lofi_common::Response::Status { mood, playing, paused, current_source } => {
+        lofi_common::Response::Status { mood, playing, paused, current_source, loop_playback } => {
             let state = playback_state_label(playing, paused);
             let source = current_source.unwrap_or_else(|| "none".to_string());
-            println!("mood: {mood}\nstate: {state}\nsource: {source}");
+            let looping = on_off_label(loop_playback);
+            println!("mood: {mood}\nstate: {state}\nsource: {source}\nloop: {looping}");
         }
         lofi_common::Response::Moods(names) => {
             for name in names {
@@ -117,6 +134,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Status => DaemonCommand::Status,
         Cmd::Moods => DaemonCommand::Moods,
         Cmd::Reload => DaemonCommand::Reload,
+        Cmd::Loop { state } => DaemonCommand::SetLoop(matches!(state, OnOff::On)),
         Cmd::Tui => unreachable!("handled above"),
         Cmd::Add { .. } => unreachable!("handled above"),
     };
@@ -142,5 +160,13 @@ mod tests {
         assert_eq!(playback_state_label(true, false), "playing");
         assert_eq!(playback_state_label(false, true), "paused");
         assert_eq!(playback_state_label(false, false), "stopped");
+    }
+
+    #[test]
+    fn loop_subcommand_accepts_only_on_or_off() {
+        assert!(matches!(Cli::try_parse_from(["lofi", "loop", "on"]).unwrap().command, Cmd::Loop { state: OnOff::On }));
+        assert!(matches!(Cli::try_parse_from(["lofi", "loop", "off"]).unwrap().command, Cmd::Loop { state: OnOff::Off }));
+        assert!(Cli::try_parse_from(["lofi", "loop", "maybe"]).is_err());
+        assert!(Cli::try_parse_from(["lofi", "loop"]).is_err());
     }
 }

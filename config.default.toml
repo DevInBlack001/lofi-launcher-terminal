@@ -1,6 +1,12 @@
 default_mood = "code-and-chill"
 long_source_minutes = 20
 
+# When a source finishes playing on its own, move on to the next source in the
+# current mood, wrapping back to the first after the last. Set to false to stop
+# at the end of each source instead. `lofi loop on|off` changes this for the
+# running daemon without editing this file.
+loop_playback = true
+
 # Each mood is a list of sources.
 # A source is a local path or a URL mpv/yt-dlp can resolve.
 # Synthwave, retrowave, and vaporwave are genre flavors: mix them into

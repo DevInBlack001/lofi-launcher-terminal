@@ -101,6 +101,7 @@ mod tests {
             moods,
             classifier: BTreeMap::new(),
             long_source_minutes: 20,
+            loop_playback: true,
         };
         let state = Arc::new(Mutex::new(DaemonState::new(config, NoopMpv)));
 

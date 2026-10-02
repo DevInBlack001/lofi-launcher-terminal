@@ -31,8 +31,9 @@ pub trait MpvController {
 pub struct RealMpv {
     socket_path: PathBuf,
     child: Child,
-    // Bumped on every source change so a background duration probe for an
-    // earlier source never seeks or loops whatever is playing now.
+    // Bumped on every source change so background work for an earlier source
+    // (the duration probe, the end-of-file listener) never acts on whatever is
+    // playing now.
     generation: Arc<AtomicU64>,
 }
 
@@ -115,10 +116,7 @@ fn seek_into_long_source(
     }
     let offset = rand_offset_seconds(duration);
     let seek = serde_json::json!({ "command": ["set_property", "time-pos", offset] });
-    let looping = serde_json::json!({ "command": ["set_property", "loop-file", "inf"] });
-    if ipc_request(socket_path, &seek, DEFAULT_IPC_TIMEOUT).is_ok() {
-        let _ = ipc_request(socket_path, &looping, DEFAULT_IPC_TIMEOUT);
-    }
+    let _ = ipc_request(socket_path, &seek, DEFAULT_IPC_TIMEOUT);
 }
 
 fn mpv_binary() -> String {
@@ -209,6 +207,24 @@ impl RealMpv {
     fn send(&self, payload: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         ipc_request(&self.socket_path, &payload, DEFAULT_IPC_TIMEOUT)
     }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    pub fn generation_counter(&self) -> Arc<AtomicU64> {
+        self.generation.clone()
+    }
+
+    // True when nothing is loaded or loading; loadfile flips it to false before
+    // its reply, so a source a command just started never reads as idle.
+    pub fn is_idle(&self) -> anyhow::Result<bool> {
+        let reply = self.send(serde_json::json!({ "command": ["get_property", "idle-active"] }))?;
+        reply
+            .get("data")
+            .and_then(|d| d.as_bool())
+            .ok_or_else(|| anyhow::anyhow!("mpv returned no idle-active value: {reply}"))
+    }
 }
 
 impl MpvController for RealMpv {
@@ -224,8 +240,8 @@ impl MpvController for RealMpv {
     ) -> anyhow::Result<()> {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.send(serde_json::json!({ "command": ["loadfile", source, "replace"] }))?;
-        // loop-file survives loadfile, so without this reset every source after
-        // a long one would loop forever.
+        // loop-file survives loadfile (and may be set in the user's mpv.conf); a
+        // looping source never reaches its end, which would block auto-advance.
         self.send(serde_json::json!({ "command": ["set_property", "loop-file", "no"] }))?;
 
         // Duration discovery can take seconds (yt-dlp resolution), and the caller
@@ -394,11 +410,11 @@ mod tests {
     }
 
     #[test]
-    fn short_source_after_a_long_one_does_not_inherit_looping() {
+    fn short_source_after_a_long_one_is_not_seeked() {
         let server = FakeMpvServer::start(180.0, Duration::ZERO);
         let mut mpv = server.mpv();
         mpv.start_source_with_duration("long.mp4", Some(3 * 3600), 1200).unwrap();
-        assert!(server.wait_for(Duration::from_secs(3), |c| c.iter().any(|c| c["command"][2] == "inf")));
+        assert!(server.wait_for(Duration::from_secs(3), |c| c.iter().any(|c| is_set(c, "time-pos"))));
 
         mpv.start_source_with_duration("short.mp3", None, 1200).unwrap();
         std::thread::sleep(Duration::from_millis(800));
@@ -423,12 +439,24 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(500), "start blocked on duration discovery");
         assert!(!server.recorded().iter().any(|c| is_set(c, "time-pos")));
 
-        assert!(server.wait_for(Duration::from_secs(5), |c| c.iter().any(|c| c["command"][2] == "inf")));
+        assert!(server.wait_for(Duration::from_secs(5), |c| c.iter().any(|c| is_set(c, "time-pos"))));
         let recorded = server.recorded();
         let seek = recorded.iter().position(|c| is_set(c, "time-pos")).expect("no seek");
-        let looping = recorded.iter().position(|c| c["command"][2] == "inf").unwrap();
         let reset = recorded.iter().position(|c| c["command"][2] == "no").unwrap();
-        assert!(reset < seek && seek < looping, "wrong order: {recorded:?}");
+        assert!(reset < seek, "wrong order: {recorded:?}");
+    }
+
+    #[test]
+    fn long_source_is_never_set_to_loop_forever_so_it_can_reach_its_end() {
+        let server = FakeMpvServer::start(3.0 * 3600.0, Duration::ZERO);
+        let mut mpv = server.mpv();
+        mpv.start_source_with_duration("https://example.com/3h-mix", None, 1200).unwrap();
+        assert!(server.wait_for(Duration::from_secs(3), |c| c.iter().any(|c| is_set(c, "time-pos"))));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !server.recorded().iter().any(|c| is_set(c, "loop-file") && c["command"][2] != "no"),
+            "loop-file inf would stop the source from ever ending and auto-advancing"
+        );
     }
 
     #[test]

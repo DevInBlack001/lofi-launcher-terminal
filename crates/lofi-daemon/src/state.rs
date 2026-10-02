@@ -1,5 +1,10 @@
 use crate::mpv::MpvController;
 use lofi_common::{Command, Config, Response};
+use std::time::{Duration, Instant};
+
+// A source that ends sooner than this after starting most likely failed to
+// produce any audio (e.g. a zero-length file), rather than being a real track.
+const MIN_HEALTHY_PLAY: Duration = Duration::from_secs(2);
 
 pub struct DaemonState<M: MpvController> {
     config: Config,
@@ -10,6 +15,11 @@ pub struct DaemonState<M: MpvController> {
     playing: bool,
     paused: bool,
     known_duration_seconds: Option<u64>,
+    last_started_at: Option<Instant>,
+    // Consecutive auto-advances whose source ended almost immediately. Once a
+    // whole mood's worth of sources has done that, auto-advance gives up rather
+    // than spinning through broken sources forever.
+    rapid_end_streak: usize,
 }
 
 impl<M: MpvController> DaemonState<M> {
@@ -24,6 +34,8 @@ impl<M: MpvController> DaemonState<M> {
             playing: false,
             paused: false,
             known_duration_seconds: None,
+            last_started_at: None,
+            rapid_end_streak: 0,
         }
     }
 
@@ -56,10 +68,60 @@ impl<M: MpvController> DaemonState<M> {
                     return Response::Error(e.to_string());
                 }
                 self.paused = false;
+                self.last_started_at = Some(Instant::now());
                 Response::Ok
             }
             None => Response::Error(format!("mood '{}' has no sources configured", self.current_mood)),
         }
+    }
+
+    fn current_mood_len(&self) -> usize {
+        self.config.moods.get(&self.current_mood).map(|m| m.sources.len()).unwrap_or(0)
+    }
+
+    fn advance_and_start(&mut self) -> Response {
+        let len = self.current_mood_len();
+        if len == 0 {
+            return Response::Error(format!("mood '{}' has no sources configured", self.current_mood));
+        }
+        self.current_index = (self.current_index + 1) % len;
+        self.start_current_mood()
+    }
+
+    // Called by the mpv event listener once a source has played to its end on
+    // its own, never as a side effect of a user command replacing it.
+    pub fn handle_natural_end_of_file(&mut self) -> Response {
+        self.handle_natural_end_of_file_at(Instant::now())
+    }
+
+    fn handle_natural_end_of_file_at(&mut self, now: Instant) -> Response {
+        if self.session_count == 0 || !self.playing {
+            return Response::Ok;
+        }
+        // mpv is idle now; this stays false unless a new source starts below.
+        self.playing = false;
+        if !self.config.loop_playback {
+            return Response::Ok;
+        }
+        let ended_rapidly = self
+            .last_started_at
+            .is_some_and(|started| now.saturating_duration_since(started) < MIN_HEALTHY_PLAY);
+        if ended_rapidly {
+            self.rapid_end_streak += 1;
+        } else {
+            self.rapid_end_streak = 0;
+        }
+        if self.rapid_end_streak >= self.current_mood_len().max(1) {
+            self.rapid_end_streak = 0;
+            return Response::Ok;
+        }
+        self.advance_and_start()
+    }
+
+    // Deliberately does not advance: a failed load (offline, dead URL) would
+    // otherwise retry every source in a loop, hammering the network.
+    pub fn handle_source_failed(&mut self) {
+        self.playing = false;
     }
 
     #[cfg(test)]
@@ -88,6 +150,7 @@ impl<M: MpvController> DaemonState<M> {
     pub fn handle(&mut self, cmd: Command) -> Response {
         match cmd {
             Command::Register => {
+                self.rapid_end_streak = 0;
                 self.session_count += 1;
                 if self.session_count == 1 {
                     self.start_current_mood()
@@ -118,6 +181,7 @@ impl<M: MpvController> DaemonState<M> {
                 }
                 self.current_mood = name;
                 self.current_index = 0;
+                self.rapid_end_streak = 0;
                 if self.session_count > 0 {
                     self.start_current_mood()
                 } else {
@@ -125,13 +189,12 @@ impl<M: MpvController> DaemonState<M> {
                 }
             }
             Command::Next => {
-                let len = self.config.moods.get(&self.current_mood).map(|m| m.sources.len()).unwrap_or(0);
-                if len == 0 {
+                if self.current_mood_len() == 0 {
                     return Response::Error(format!("mood '{}' has no sources configured", self.current_mood));
                 }
+                self.rapid_end_streak = 0;
                 if self.session_count > 0 {
-                    self.current_index = (self.current_index + 1) % len;
-                    self.start_current_mood()
+                    self.advance_and_start()
                 } else {
                     Response::Ok
                 }
@@ -163,6 +226,7 @@ impl<M: MpvController> DaemonState<M> {
                     playing: loaded && !self.paused,
                     paused: loaded && self.paused,
                     current_source,
+                    loop_playback: self.config.loop_playback,
                 }
             }
             Command::Moods => Response::Moods(self.config.moods.keys().cloned().collect()),
@@ -173,6 +237,10 @@ impl<M: MpvController> DaemonState<M> {
                 }
                 Err(e) => Response::Error(format!("could not reload config: {e}")),
             },
+            Command::SetLoop(enabled) => {
+                self.config.loop_playback = enabled;
+                Response::Ok
+            }
             Command::Add { source, mood } => {
                 let target_mood = match mood {
                     Some(name) => name,
@@ -204,6 +272,9 @@ impl<M: MpvController> DaemonState<M> {
                 if let Err(e) = lofi_common::save_config(&path, &fresh) {
                     return Response::Error(e.to_string());
                 }
+                // Runtime toggles are session overrides; only an explicit reload
+                // should replace them with the file's values.
+                fresh.loop_playback = self.config.loop_playback;
                 self.replace_config(fresh);
                 Response::Classified(target_mood)
             }
@@ -223,7 +294,6 @@ mod tests {
         stopped: bool,
         paused: bool,
         last_seek_requested: bool,
-        loop_file_requested: bool,
     }
 
     impl MpvController for FakeMpv {
@@ -242,7 +312,6 @@ mod tests {
             self.stopped = false;
             self.last_seek_requested =
                 matches!(duration_seconds, Some(d) if d > long_source_threshold_seconds);
-            self.loop_file_requested = self.last_seek_requested;
             Ok(())
         }
         fn stop(&mut self) -> anyhow::Result<()> {
@@ -274,6 +343,7 @@ mod tests {
             moods,
             classifier: BTreeMap::new(),
             long_source_minutes: 20,
+            loop_playback: true,
         }
     }
 
@@ -366,6 +436,7 @@ mod tests {
             moods,
             classifier: BTreeMap::new(),
             long_source_minutes: 20,
+            loop_playback: true,
         };
         let mut state = DaemonState::new(config, FakeMpv::default());
         state.set_known_duration_seconds_for_test(Some(3 * 3600));
@@ -385,12 +456,12 @@ mod tests {
             moods,
             classifier: BTreeMap::new(),
             long_source_minutes: 20,
+            loop_playback: true,
         };
         let mut state = DaemonState::new(config, FakeMpv::default());
         state.set_known_duration_seconds_for_test(Some(180));
         state.handle(Command::Register);
         assert!(!state.mpv.last_seek_requested, "a 3 minute source must not request a seek");
-        assert!(!state.mpv.loop_file_requested, "a 3 minute source must not request loop-file");
     }
 
     fn status_flags(state: &mut DaemonState<FakeMpv>) -> (bool, bool) {
@@ -455,6 +526,125 @@ mod tests {
         state.handle(Command::Next);
         assert!(!state.mpv.paused);
         assert_eq!(status_flags(&mut state), (true, false));
+    }
+
+    fn two_source_config() -> Config {
+        let mut config = test_config();
+        config.moods.get_mut("code-and-chill").unwrap().sources = vec!["a.mp3".to_string(), "b.mp3".to_string()];
+        config
+    }
+
+    fn status_loop(state: &mut DaemonState<FakeMpv>) -> bool {
+        match state.handle(Command::Status) {
+            Response::Status { loop_playback, .. } => loop_playback,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    fn well_after_start(state: &DaemonState<FakeMpv>) -> std::time::Instant {
+        state.last_started_at.expect("a source was started") + std::time::Duration::from_secs(60)
+    }
+
+    #[test]
+    fn natural_end_with_loop_on_advances_and_wraps_to_the_first_source() {
+        let mut state = DaemonState::new(two_source_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        let now = well_after_start(&state);
+        state.handle_natural_end_of_file_at(now);
+        let now = well_after_start(&state);
+        state.handle_natural_end_of_file_at(now);
+        assert_eq!(state.mpv.started, vec!["a.mp3", "b.mp3", "a.mp3"]);
+        assert_eq!(status_flags(&mut state), (true, false));
+    }
+
+    #[test]
+    fn natural_end_with_loop_off_stays_idle_and_reports_stopped() {
+        let mut state = DaemonState::new(two_source_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        assert!(matches!(state.handle(Command::SetLoop(false)), Response::Ok));
+        let now = well_after_start(&state);
+        state.handle_natural_end_of_file_at(now);
+        assert_eq!(state.mpv.started, vec!["a.mp3"], "must not advance with loop off");
+        assert_eq!(state.current_index, 0);
+        assert_eq!(status_flags(&mut state), (false, false));
+    }
+
+    #[test]
+    fn natural_end_with_no_session_or_nothing_playing_is_ignored() {
+        let mut state = DaemonState::new(two_source_config(), FakeMpv::default());
+        state.handle_natural_end_of_file();
+        assert!(state.mpv.started.is_empty());
+
+        state.handle(Command::Register);
+        state.handle(Command::Unregister);
+        state.handle_natural_end_of_file();
+        assert_eq!(state.mpv.started, vec!["a.mp3"], "a stopped session must not be restarted");
+    }
+
+    #[test]
+    fn next_and_natural_end_share_the_same_advance_logic() {
+        let mut state = DaemonState::new(two_source_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        state.handle(Command::Next);
+        let now = well_after_start(&state);
+        state.handle_natural_end_of_file_at(now);
+        assert_eq!(state.mpv.started, vec!["a.mp3", "b.mp3", "a.mp3"]);
+        assert_eq!(state.current_index, 0);
+    }
+
+    #[test]
+    fn sources_that_all_end_instantly_stop_auto_advance_after_one_full_cycle() {
+        let mut state = DaemonState::new(two_source_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        for _ in 0..10 {
+            let instant_end = state.last_started_at.unwrap();
+            state.handle_natural_end_of_file_at(instant_end);
+        }
+        assert_eq!(state.mpv.started, vec!["a.mp3", "b.mp3"], "must not spin through broken sources forever");
+        assert_eq!(status_flags(&mut state), (false, false));
+
+        // An explicit user action starts over with a clean slate.
+        state.handle(Command::Next);
+        let now = well_after_start(&state);
+        state.handle_natural_end_of_file_at(now);
+        assert_eq!(state.mpv.started, vec!["a.mp3", "b.mp3", "a.mp3", "b.mp3"]);
+    }
+
+    #[test]
+    fn source_failure_marks_playback_stopped_without_advancing() {
+        let mut state = DaemonState::new(two_source_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        state.handle_source_failed();
+        assert_eq!(state.mpv.started, vec!["a.mp3"]);
+        assert_eq!(status_flags(&mut state), (false, false));
+    }
+
+    #[test]
+    fn set_loop_is_reflected_in_status_and_defaults_to_on() {
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        assert!(status_loop(&mut state));
+        assert!(matches!(state.handle(Command::SetLoop(false)), Response::Ok));
+        assert!(!status_loop(&mut state));
+        assert!(matches!(state.handle(Command::SetLoop(true)), Response::Ok));
+        assert!(status_loop(&mut state));
+    }
+
+    #[test]
+    fn add_keeps_the_runtime_loop_setting_but_reload_takes_the_file_value() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+        write_config_to(scratch_dir.path(), &test_config());
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        state.handle(Command::SetLoop(false));
+        state.handle(Command::Add { source: "x.mp3".to_string(), mood: Some("deep-focus".to_string()) });
+        let after_add = status_loop(&mut state);
+        state.handle(Command::Reload);
+        let after_reload = status_loop(&mut state);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(!after_add, "lofi add must not silently undo lofi loop off");
+        assert!(after_reload, "reload re-reads every setting from the file");
     }
 
     fn write_config_to(dir: &std::path::Path, config: &Config) -> std::path::PathBuf {

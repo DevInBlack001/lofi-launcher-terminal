@@ -73,6 +73,11 @@ whichever mood's list fits, they don't get their own mood keys. A long
 source (a multi-hour YouTube mix, for example) is never downloaded or cut
 into clips; mpv just seeks to a random point in it each time it's selected.
 
+When a source finishes, playback moves on to the next source in the mood,
+wrapping back to the first after the last. Set `loop_playback = false` in
+`config.toml` (or run `lofi loop off`) to stop at the end of each source
+instead.
+
 The daemon reads `config.toml` once at startup, so after editing the file by
 hand run `lofi reload` (or restart the daemon) for the changes to take
 effect. `lofi add` always re-reads the file before appending, so it never
@@ -87,6 +92,7 @@ lofi next               # skip to the next source in the current mood
 lofi pause / lofi resume
 lofi moods              # list configured mood names
 lofi reload             # re-read config.toml after editing it by hand
+lofi loop on / lofi loop off  # auto-advance to the next source when one finishes (default on)
 lofi add <url>          # classify a URL into a mood and add it
 lofi add <url-or-path> --mood ambient  # add it to a specific mood directly
 lofi tui                # interactive mood picker

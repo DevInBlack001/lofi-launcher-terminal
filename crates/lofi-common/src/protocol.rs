@@ -13,6 +13,7 @@ pub enum Command {
     Moods,
     Reload,
     Add { source: String, mood: Option<String> },
+    SetLoop(bool),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +31,9 @@ pub enum Response {
         #[serde(default)]
         paused: bool,
         current_source: Option<String>,
+        // A daemon predating this field never auto-advanced, so false is accurate.
+        #[serde(default)]
+        loop_playback: bool,
     },
     Moods(Vec<String>),
     Classified(String),
@@ -74,15 +78,17 @@ mod tests {
             playing: false,
             paused: true,
             current_source: Some("https://example.com/playlist".to_string()),
+            loop_playback: true,
         };
         let line = encode_response(&resp);
         let decoded = decode_response(line.trim_end()).unwrap();
         match decoded {
-            Response::Status { mood, playing, paused, current_source } => {
+            Response::Status { mood, playing, paused, current_source, loop_playback } => {
                 assert_eq!(mood, "code-and-chill");
                 assert!(!playing);
                 assert!(paused);
                 assert_eq!(current_source.as_deref(), Some("https://example.com/playlist"));
+                assert!(loop_playback);
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -92,11 +98,23 @@ mod tests {
     fn decodes_status_from_a_daemon_that_predates_the_paused_field() {
         let line = r#"{"kind":"Status","data":{"mood":"ambient","playing":true,"current_source":null}}"#;
         match decode_response(line).unwrap() {
-            Response::Status { playing, paused, .. } => {
+            Response::Status { playing, paused, loop_playback, .. } => {
                 assert!(playing);
                 assert!(!paused);
+                assert!(!loop_playback);
             }
             other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round_trips_set_loop_command() {
+        for enabled in [true, false] {
+            let line = encode_command(&Command::SetLoop(enabled));
+            match decode_command(line.trim_end()).unwrap() {
+                Command::SetLoop(decoded) => assert_eq!(decoded, enabled),
+                other => panic!("unexpected {other:?}"),
+            }
         }
     }
 
