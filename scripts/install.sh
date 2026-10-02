@@ -66,7 +66,17 @@ if ! command -v mpv >/dev/null 2>&1; then
     echo "Warning: mpv not detected on PATH, install it via your distro's package manager for playback to work."
 fi
 
-if [ ! -e /usr/share/mpv/scripts/mpris.so ] && [ ! -e /usr/lib/mpv/scripts/mpris.so ] && [ ! -e /usr/local/share/mpv/scripts/mpris.so ] && [ -z "${LOFI_MPV_MPRIS_SCRIPT:-}" ]; then
+# Kept in sync with crates/lofi-daemon/src/mpv.rs's MPRIS_SCRIPT_CANDIDATES
+# and user-config-dir fallback, since this is a separate shell-side check
+# only used to print an install-time hint, not the actual runtime detection.
+USER_MPV_SCRIPTS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/mpv/scripts"
+if [ ! -e /usr/share/mpv/scripts/mpris.so ] \
+    && [ ! -e /usr/lib/mpv/scripts/mpris.so ] \
+    && [ ! -e /usr/local/share/mpv/scripts/mpris.so ] \
+    && [ ! -e /usr/lib/mpv-mpris/mpris.so ] \
+    && [ ! -e /etc/mpv/scripts/mpris.so ] \
+    && [ ! -e "$USER_MPV_SCRIPTS_DIR/mpris.so" ] \
+    && [ -z "${LOFI_MPV_MPRIS_SCRIPT:-}" ]; then
     echo "Note: mpv-mpris not detected, now-playing widgets (quickshell, playerctl, etc.) won't see this player. Playback still works without it."
 fi
 
