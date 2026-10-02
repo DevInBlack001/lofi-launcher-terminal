@@ -113,10 +113,18 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<Config> {
 }
 
 pub fn load_config_or_default(path: &std::path::Path) -> anyhow::Result<Config> {
-    if path.exists() {
-        load_config(path)
-    } else {
-        Ok(toml::from_str(default_config_toml())?)
+    match std::fs::metadata(path) {
+        Ok(_) => load_config(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(toml::from_str(default_config_toml())?)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(anyhow::anyhow!(
+                "permission denied reading {}: the file exists but this user cannot read it (fix: add the user to the appropriate group or adjust file permissions)",
+                path.display()
+            ))
+        }
+        Err(e) => Err(anyhow::anyhow!("could not read {}: {e}", path.display())),
     }
 }
 
@@ -136,6 +144,63 @@ pub fn save_config(path: &std::path::Path, config: &Config) -> anyhow::Result<()
         .ok_or_else(|| anyhow::anyhow!("config path {} has no parent directory", target.display()))?;
     std::fs::create_dir_all(parent)?;
     let text = toml::to_string_pretty(config)?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("config path {} has no file name", target.display()))?;
+    // Same directory as the target so the rename stays on one filesystem and is
+    // atomic: a crash mid-write leaves the old config intact, never a truncated one.
+    let tmp_path = parent.join(format!(".{}.tmp-{}", file_name.to_string_lossy(), std::process::id()));
+    // Carry over the existing file's permission bits so a config with non-default
+    // permissions (e.g. group-readable) doesn't change after a rewrite.
+    let existing_permissions = std::fs::metadata(&target).ok().map(|m| m.permissions());
+    let write_result = (|| -> anyhow::Result<()> {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        if let Some(perms) = existing_permissions {
+            std::fs::set_permissions(&tmp_path, perms)?;
+        }
+        std::fs::rename(&tmp_path, &target)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
+pub fn append_source_to_mood(path: &std::path::Path, mood: &str, source: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    // symlink_metadata (not metadata) inspects the link itself rather than following
+    // it, so a symlinked config.toml (common with dotfiles managed via Stow) is
+    // detected here instead of being silently replaced by a plain file below.
+    let is_symlink = std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    // Resolve through the symlink so the write and rename land on whatever the link
+    // actually points to, leaving the symlink itself untouched.
+    let target = if is_symlink { std::fs::canonicalize(path)? } else { path.to_path_buf() };
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path {} has no parent directory", target.display()))?;
+    std::fs::create_dir_all(parent)?;
+
+    let existing_text = if target.exists() {
+        std::fs::read_to_string(&target)?
+    } else {
+        default_config_toml().to_string()
+    };
+
+    let mut doc: toml_edit::DocumentMut = existing_text.parse()?;
+
+    doc.get_mut("moods")
+        .and_then(|moods| moods.get_mut(mood))
+        .and_then(|mood_table| mood_table.get_mut("sources"))
+        .and_then(|sources| sources.as_array_mut())
+        .ok_or_else(|| anyhow::anyhow!("could not find moods.{}.sources in config", mood))?
+        .push(source);
+
+    let text = doc.to_string();
     let file_name = target
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("config path {} has no file name", target.display()))?;
@@ -290,6 +355,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = load_config_or_default(&dir.path().join("missing.toml")).unwrap();
         assert_eq!(cfg.default_mood, "code-and-chill");
+    }
+
+    #[test]
+    fn append_source_to_mood_preserves_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config_with_comment = r#"default_mood = "code-and-chill"
+
+# This is my custom comment about ambient sources
+[moods.ambient]
+sources = ["existing.mp3"]
+"#;
+        std::fs::write(&path, config_with_comment).unwrap();
+
+        append_source_to_mood(&path, "ambient", "new.mp3").unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("# This is my custom comment about ambient sources"),
+                "comment was not preserved: {written}");
+        assert!(written.contains("\"new.mp3\""), "new source was not added: {written}");
+    }
+
+    #[test]
+    fn load_config_or_default_distinguishes_permission_error_from_missing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_mood = \"test\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = load_config_or_default(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(result.is_err(), "expected an error for permission-denied file");
+        let err_msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            err_msg.contains("permission"),
+            "error message must mention permission, got: {err_msg}"
+        );
+
+        let missing_result = load_config_or_default(&dir.path().join("nonexistent.toml"));
+        assert!(missing_result.is_ok(), "missing file should fall back to defaults");
     }
 
     #[test]

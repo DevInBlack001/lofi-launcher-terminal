@@ -302,7 +302,7 @@ impl<M: MpvController> DaemonState<M> {
                 // The daemon is long-lived, so its in-memory config is likely stale
                 // relative to hand edits; append to what is on disk right now.
                 let path = lofi_common::config_path();
-                let mut fresh = match lofi_common::load_config_or_default(&path) {
+                let fresh = match lofi_common::load_config_or_default(&path) {
                     Ok(config) => config,
                     Err(e) => {
                         return Response::Error(format!(
@@ -311,14 +311,22 @@ impl<M: MpvController> DaemonState<M> {
                         ))
                     }
                 };
-                let Some(mood_entry) = fresh.moods.get_mut(&target_mood) else {
+                if !fresh.moods.contains_key(&target_mood) {
                     let valid = fresh.moods.keys().cloned().collect::<Vec<_>>().join(", ");
                     return Response::Error(format!("unknown mood '{target_mood}', valid moods: {valid}"));
-                };
-                mood_entry.sources.push(source);
-                if let Err(e) = lofi_common::save_config(&path, &fresh) {
+                }
+                if let Err(e) = lofi_common::append_source_to_mood(&path, &target_mood, &source) {
                     return Response::Error(e.to_string());
                 }
+                let mut fresh = match lofi_common::load_config_or_default(&path) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        return Response::Error(format!(
+                            "could not read {} after appending: {e}",
+                            path.display()
+                        ))
+                    }
+                };
                 // Runtime toggles are session overrides; only an explicit reload
                 // should replace them with the file's values.
                 fresh.loop_playback = self.config.loop_playback;
