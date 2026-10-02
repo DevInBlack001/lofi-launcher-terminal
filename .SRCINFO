@@ -11,6 +11,6 @@ pkgbase = lofi-launcher-terminal
 	optdepends = mpv-mpris: expose now-playing track info over MPRIS for widgets like quickshell or playerctl
 	optdepends = yt-dlp: required for lofi add to classify a URL source and for mpv to stream URL sources at all
 	source = lofi-launcher-terminal-0.1.0.tar.gz::https://github.com/DevInBlack001/lofi-launcher-terminal/archive/v0.1.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 6ec2f1c3faf541f63c2bcb7e2a310636af14af6ce34ff84f6f116db7e64b2e9a
 
 pkgname = lofi-launcher-terminal
