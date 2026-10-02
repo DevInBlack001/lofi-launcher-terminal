@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 pub const BUILTIN_MOODS: [&str; 5] = ["code-and-chill", "deep-focus", "chill-beats", "rainy-day", "ambient"];
 pub const DEFAULT_LONG_SOURCE_MINUTES: u32 = 20;
+pub const AUDIO_QUALITIES: [&str; 2] = ["min", "max"];
+pub const DEFAULT_AUDIO_QUALITY: &str = "min";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mood {
@@ -19,6 +21,27 @@ fn default_loop_playback() -> bool {
     true
 }
 
+fn default_audio_quality() -> String {
+    DEFAULT_AUDIO_QUALITY.to_string()
+}
+
+pub fn is_valid_audio_quality(quality: &str) -> bool {
+    AUDIO_QUALITIES.contains(&quality)
+}
+
+// Both tiers pick an audio-only stream whenever the source offers one, so no
+// video bytes are fetched. The "/worst" fallback only engages for sources with
+// no audio-only format at all (some live streams only publish muxed renditions):
+// they still play, and "max" deliberately falls back to the smallest muxed
+// stream rather than the largest, since the extra video bytes buy nothing.
+pub fn ytdl_format_for(quality: &str) -> &'static str {
+    match quality {
+        "max" => "bestaudio/worst",
+        // Covers "min" and any unrecognized value from a hand-edited config.
+        _ => "worstaudio/worst",
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub default_mood: String,
@@ -29,6 +52,8 @@ pub struct Config {
     pub long_source_minutes: u32,
     #[serde(default = "default_loop_playback")]
     pub loop_playback: bool,
+    #[serde(default = "default_audio_quality")]
+    pub audio_quality: String,
 }
 
 pub fn default_config_toml() -> &'static str {
@@ -147,6 +172,31 @@ mod tests {
         let cfg: Config =
             toml::from_str("default_mood = \"ambient\"\nloop_playback = false\n[moods.ambient]\nsources = []\n").unwrap();
         assert!(!cfg.loop_playback);
+    }
+
+    #[test]
+    fn audio_quality_defaults_to_min_when_absent() {
+        let cfg: Config = toml::from_str("default_mood = \"ambient\"\n[moods.ambient]\nsources = []\n").unwrap();
+        assert_eq!(cfg.audio_quality, "min");
+        let cfg: Config = toml::from_str(default_config_toml()).unwrap();
+        assert_eq!(cfg.audio_quality, "min");
+    }
+
+    #[test]
+    fn ytdl_format_selectors_prefer_audio_only_and_fall_back_to_the_smallest_muxed_stream() {
+        assert_eq!(ytdl_format_for("min"), "worstaudio/worst");
+        assert_eq!(ytdl_format_for("max"), "bestaudio/worst");
+        for selector in [ytdl_format_for("min"), ytdl_format_for("max")] {
+            assert!(!selector.contains("video"), "{selector} could select a video stream first");
+            assert!(selector.ends_with("/worst"), "{selector} could fall back to a large muxed stream");
+        }
+    }
+
+    #[test]
+    fn unknown_audio_quality_falls_back_to_the_default_selector() {
+        assert_eq!(ytdl_format_for("medium"), ytdl_format_for(DEFAULT_AUDIO_QUALITY));
+        assert!(is_valid_audio_quality("min") && is_valid_audio_quality("max"));
+        assert!(!is_valid_audio_quality("MAX") && !is_valid_audio_quality(""));
     }
 
     #[test]

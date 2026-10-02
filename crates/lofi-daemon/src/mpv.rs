@@ -7,18 +7,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Copy)]
+pub struct StartOptions<'a> {
+    pub known_duration_seconds: Option<u64>,
+    pub long_source_threshold_seconds: u64,
+    // yt-dlp format selector for mpv's ytdl hook. mpv only consults it for
+    // sources the hook resolves (URLs); local files ignore it entirely.
+    pub ytdl_format: &'a str,
+}
+
 pub trait MpvController {
     // Convenience wrapper that RealMpv's own start_source delegates through for the
     // simple case; nothing in the current binary calls it directly since everything
-    // goes through start_source_with_duration now.
+    // goes through start_source_with_options now.
     #[allow(dead_code)]
     fn start_source(&mut self, source: &str) -> anyhow::Result<()>;
-    fn start_source_with_duration(
-        &mut self,
-        source: &str,
-        duration_seconds: Option<u64>,
-        long_source_threshold_seconds: u64,
-    ) -> anyhow::Result<()>;
+    fn start_source_with_options(&mut self, source: &str, options: &StartOptions) -> anyhow::Result<()>;
     fn stop(&mut self) -> anyhow::Result<()>;
     fn pause(&mut self) -> anyhow::Result<()>;
     fn resume(&mut self) -> anyhow::Result<()>;
@@ -229,16 +233,21 @@ impl RealMpv {
 
 impl MpvController for RealMpv {
     fn start_source(&mut self, source: &str) -> anyhow::Result<()> {
-        self.start_source_with_duration(source, None, u64::MAX)
+        let options = StartOptions {
+            known_duration_seconds: None,
+            long_source_threshold_seconds: u64::MAX,
+            ytdl_format: lofi_common::ytdl_format_for(lofi_common::DEFAULT_AUDIO_QUALITY),
+        };
+        self.start_source_with_options(source, &options)
     }
 
-    fn start_source_with_duration(
-        &mut self,
-        source: &str,
-        duration_seconds: Option<u64>,
-        long_source_threshold_seconds: u64,
-    ) -> anyhow::Result<()> {
+    fn start_source_with_options(&mut self, source: &str, options: &StartOptions) -> anyhow::Result<()> {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // mpv's ytdl hook only falls back to an audio-only selector on its own
+        // when ytdl-format is empty; a value from the user's mpv.conf (e.g.
+        // bestvideo+bestaudio) would stream video that --no-video throws away.
+        // The hook reads it at load time, so it must be set before loadfile.
+        self.send(serde_json::json!({ "command": ["set_property", "ytdl-format", options.ytdl_format] }))?;
         self.send(serde_json::json!({ "command": ["loadfile", source, "replace"] }))?;
         // loop-file survives loadfile (and may be set in the user's mpv.conf); a
         // looping source never reaches its end, which would block auto-advance.
@@ -249,12 +258,14 @@ impl MpvController for RealMpv {
         // needs the socket path: every IPC request opens its own connection.
         let socket_path = self.socket_path.clone();
         let generation_counter = self.generation.clone();
+        let known_duration_seconds = options.known_duration_seconds;
+        let long_source_threshold_seconds = options.long_source_threshold_seconds;
         std::thread::spawn(move || {
             seek_into_long_source(
                 &socket_path,
                 &generation_counter,
                 generation,
-                duration_seconds,
+                known_duration_seconds,
                 long_source_threshold_seconds,
             );
         });
@@ -394,29 +405,66 @@ mod tests {
         }
     }
 
+    fn opts(known_duration_seconds: Option<u64>) -> StartOptions<'static> {
+        StartOptions {
+            known_duration_seconds,
+            long_source_threshold_seconds: 1200,
+            ytdl_format: "worstaudio/worst",
+        }
+    }
+
     fn is_set(cmd: &serde_json::Value, property: &str) -> bool {
         cmd["command"][0] == "set_property" && cmd["command"][1] == property
+    }
+
+    #[test]
+    fn ytdl_format_is_set_before_every_loadfile_so_video_is_never_fetched() {
+        let server = FakeMpvServer::start(180.0, Duration::ZERO);
+        let mut mpv = server.mpv();
+        let options = StartOptions { ytdl_format: "bestaudio/worst", ..opts(None) };
+        mpv.start_source_with_options("https://example.com/watch?v=abc", &options).unwrap();
+        mpv.start_source_with_options("/music/local.flac", &opts(None)).unwrap();
+
+        assert_eq!(
+            format_set_before_each_load(&server.recorded()),
+            vec![Some("bestaudio/worst".to_string()), Some("worstaudio/worst".to_string())]
+        );
+    }
+
+    // For each loadfile, the ytdl-format value set since the previous loadfile.
+    fn format_set_before_each_load(recorded: &[serde_json::Value]) -> Vec<Option<String>> {
+        let mut result = Vec::new();
+        let mut pending = None;
+        for cmd in recorded {
+            if is_set(cmd, "ytdl-format") {
+                pending = cmd["command"][2].as_str().map(str::to_string);
+            } else if cmd["command"][0] == "loadfile" {
+                result.push(pending.take());
+            }
+        }
+        result
     }
 
     #[test]
     fn every_source_start_resets_loop_file_right_after_loadfile() {
         let server = FakeMpvServer::start(180.0, Duration::ZERO);
         let mut mpv = server.mpv();
-        mpv.start_source_with_duration("short.mp3", None, 1200).unwrap();
+        mpv.start_source_with_options("short.mp3", &opts(None)).unwrap();
 
         let recorded = server.recorded();
-        assert_eq!(recorded[0]["command"], serde_json::json!(["loadfile", "short.mp3", "replace"]));
-        assert_eq!(recorded[1]["command"], serde_json::json!(["set_property", "loop-file", "no"]));
+        let load = recorded.iter().position(|c| c["command"][0] == "loadfile").expect("no loadfile");
+        assert_eq!(recorded[load]["command"], serde_json::json!(["loadfile", "short.mp3", "replace"]));
+        assert_eq!(recorded[load + 1]["command"], serde_json::json!(["set_property", "loop-file", "no"]));
     }
 
     #[test]
     fn short_source_after_a_long_one_is_not_seeked() {
         let server = FakeMpvServer::start(180.0, Duration::ZERO);
         let mut mpv = server.mpv();
-        mpv.start_source_with_duration("long.mp4", Some(3 * 3600), 1200).unwrap();
+        mpv.start_source_with_options("long.mp4", &opts(Some(3 * 3600))).unwrap();
         assert!(server.wait_for(Duration::from_secs(3), |c| c.iter().any(|c| is_set(c, "time-pos"))));
 
-        mpv.start_source_with_duration("short.mp3", None, 1200).unwrap();
+        mpv.start_source_with_options("short.mp3", &opts(None)).unwrap();
         std::thread::sleep(Duration::from_millis(800));
         let recorded = server.recorded();
         let after_short: Vec<_> = recorded
@@ -435,7 +483,7 @@ mod tests {
         let server = FakeMpvServer::start(3.0 * 3600.0, Duration::from_millis(1500));
         let mut mpv = server.mpv();
         let started = Instant::now();
-        mpv.start_source_with_duration("https://example.com/3h-mix", None, 1200).unwrap();
+        mpv.start_source_with_options("https://example.com/3h-mix", &opts(None)).unwrap();
         assert!(started.elapsed() < Duration::from_millis(500), "start blocked on duration discovery");
         assert!(!server.recorded().iter().any(|c| is_set(c, "time-pos")));
 
@@ -450,7 +498,7 @@ mod tests {
     fn long_source_is_never_set_to_loop_forever_so_it_can_reach_its_end() {
         let server = FakeMpvServer::start(3.0 * 3600.0, Duration::ZERO);
         let mut mpv = server.mpv();
-        mpv.start_source_with_duration("https://example.com/3h-mix", None, 1200).unwrap();
+        mpv.start_source_with_options("https://example.com/3h-mix", &opts(None)).unwrap();
         assert!(server.wait_for(Duration::from_secs(3), |c| c.iter().any(|c| is_set(c, "time-pos"))));
         std::thread::sleep(Duration::from_millis(300));
         assert!(
@@ -463,8 +511,8 @@ mod tests {
     fn stale_background_probe_does_not_seek_a_newer_source() {
         let server = FakeMpvServer::start(3.0 * 3600.0, Duration::from_millis(600));
         let mut mpv = server.mpv();
-        mpv.start_source_with_duration("https://example.com/3h-mix", None, 1200).unwrap();
-        mpv.start_source_with_duration("short.mp3", Some(180), 1200).unwrap();
+        mpv.start_source_with_options("https://example.com/3h-mix", &opts(None)).unwrap();
+        mpv.start_source_with_options("short.mp3", &opts(Some(180))).unwrap();
         std::thread::sleep(Duration::from_millis(1500));
         let recorded = server.recorded();
         assert!(

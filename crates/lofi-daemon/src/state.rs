@@ -1,4 +1,4 @@
-use crate::mpv::MpvController;
+use crate::mpv::{MpvController, StartOptions};
 use lofi_common::{Command, Config, Response};
 use std::time::{Duration, Instant};
 
@@ -52,12 +52,12 @@ impl<M: MpvController> DaemonState<M> {
         };
         match mood.sources.get(self.current_index) {
             Some(source) => {
-                let threshold_seconds = (self.config.long_source_minutes as u64) * 60;
-                let result = self.mpv.start_source_with_duration(
-                    source,
-                    self.known_duration_seconds,
-                    threshold_seconds,
-                );
+                let options = StartOptions {
+                    known_duration_seconds: self.known_duration_seconds,
+                    long_source_threshold_seconds: (self.config.long_source_minutes as u64) * 60,
+                    ytdl_format: lofi_common::ytdl_format_for(&self.config.audio_quality),
+                };
+                let result = self.mpv.start_source_with_options(source, &options);
                 if let Err(e) = result {
                     return Response::Error(e.to_string());
                 }
@@ -227,6 +227,7 @@ impl<M: MpvController> DaemonState<M> {
                     paused: loaded && self.paused,
                     current_source,
                     loop_playback: self.config.loop_playback,
+                    audio_quality: self.config.audio_quality.clone(),
                 }
             }
             Command::Moods => Response::Moods(self.config.moods.keys().cloned().collect()),
@@ -239,6 +240,18 @@ impl<M: MpvController> DaemonState<M> {
             },
             Command::SetLoop(enabled) => {
                 self.config.loop_playback = enabled;
+                Response::Ok
+            }
+            // Applies from the next source loaded: switching the current stream
+            // would restart it from the beginning.
+            Command::SetAudioQuality(quality) => {
+                if !lofi_common::is_valid_audio_quality(&quality) {
+                    return Response::Error(format!(
+                        "unknown audio quality '{quality}', valid values: {}",
+                        lofi_common::AUDIO_QUALITIES.join(", ")
+                    ));
+                }
+                self.config.audio_quality = quality;
                 Response::Ok
             }
             Command::Add { source, mood } => {
@@ -275,6 +288,7 @@ impl<M: MpvController> DaemonState<M> {
                 // Runtime toggles are session overrides; only an explicit reload
                 // should replace them with the file's values.
                 fresh.loop_playback = self.config.loop_playback;
+                fresh.audio_quality = self.config.audio_quality.clone();
                 self.replace_config(fresh);
                 Response::Classified(target_mood)
             }
@@ -294,6 +308,7 @@ mod tests {
         stopped: bool,
         paused: bool,
         last_seek_requested: bool,
+        last_ytdl_format: Option<String>,
     }
 
     impl MpvController for FakeMpv {
@@ -302,16 +317,14 @@ mod tests {
             self.stopped = false;
             Ok(())
         }
-        fn start_source_with_duration(
-            &mut self,
-            source: &str,
-            duration_seconds: Option<u64>,
-            long_source_threshold_seconds: u64,
-        ) -> anyhow::Result<()> {
+        fn start_source_with_options(&mut self, source: &str, options: &StartOptions) -> anyhow::Result<()> {
             self.started.push(source.to_string());
             self.stopped = false;
-            self.last_seek_requested =
-                matches!(duration_seconds, Some(d) if d > long_source_threshold_seconds);
+            self.last_seek_requested = matches!(
+                options.known_duration_seconds,
+                Some(d) if d > options.long_source_threshold_seconds
+            );
+            self.last_ytdl_format = Some(options.ytdl_format.to_string());
             Ok(())
         }
         fn stop(&mut self) -> anyhow::Result<()> {
@@ -344,6 +357,7 @@ mod tests {
             classifier: BTreeMap::new(),
             long_source_minutes: 20,
             loop_playback: true,
+            audio_quality: "min".to_string(),
         }
     }
 
@@ -437,6 +451,7 @@ mod tests {
             classifier: BTreeMap::new(),
             long_source_minutes: 20,
             loop_playback: true,
+            audio_quality: "min".to_string(),
         };
         let mut state = DaemonState::new(config, FakeMpv::default());
         state.set_known_duration_seconds_for_test(Some(3 * 3600));
@@ -457,6 +472,7 @@ mod tests {
             classifier: BTreeMap::new(),
             long_source_minutes: 20,
             loop_playback: true,
+            audio_quality: "min".to_string(),
         };
         let mut state = DaemonState::new(config, FakeMpv::default());
         state.set_known_duration_seconds_for_test(Some(180));
@@ -526,6 +542,54 @@ mod tests {
         state.handle(Command::Next);
         assert!(!state.mpv.paused);
         assert_eq!(status_flags(&mut state), (true, false));
+    }
+
+    fn status_quality(state: &mut DaemonState<FakeMpv>) -> String {
+        match state.handle(Command::Status) {
+            Response::Status { audio_quality, .. } => audio_quality,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_source_start_requests_the_audio_only_format_for_the_current_quality() {
+        let mut state = DaemonState::new(two_source_config(), FakeMpv::default());
+        state.handle(Command::Register);
+        assert_eq!(state.mpv.last_ytdl_format.as_deref(), Some("worstaudio/worst"));
+        assert!(matches!(state.handle(Command::SetAudioQuality("max".to_string())), Response::Ok));
+        state.handle(Command::Next);
+        assert_eq!(state.mpv.last_ytdl_format.as_deref(), Some("bestaudio/worst"));
+    }
+
+    #[test]
+    fn set_audio_quality_accepts_only_min_or_max_and_is_reflected_in_status() {
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        assert_eq!(status_quality(&mut state), "min");
+        assert!(matches!(state.handle(Command::SetAudioQuality("max".to_string())), Response::Ok));
+        assert_eq!(status_quality(&mut state), "max");
+        for bad in ["medium", "MAX", "", "bestaudio"] {
+            match state.handle(Command::SetAudioQuality(bad.to_string())) {
+                Response::Error(msg) => assert!(msg.contains("min") && msg.contains("max"), "{msg}"),
+                other => panic!("expected error for {bad:?}, got {other:?}"),
+            }
+        }
+        assert_eq!(status_quality(&mut state), "max", "a rejected value must not change the setting");
+        assert!(state.mpv.started.is_empty(), "changing quality must not restart playback");
+    }
+
+    #[test]
+    fn add_keeps_the_runtime_audio_quality() {
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", scratch_dir.path());
+        write_config_to(scratch_dir.path(), &test_config());
+
+        let mut state = DaemonState::new(test_config(), FakeMpv::default());
+        state.handle(Command::SetAudioQuality("max".to_string()));
+        state.handle(Command::Add { source: "x.mp3".to_string(), mood: Some("deep-focus".to_string()) });
+        let after_add = status_quality(&mut state);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert_eq!(after_add, "max");
     }
 
     fn two_source_config() -> Config {

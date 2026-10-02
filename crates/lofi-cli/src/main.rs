@@ -33,6 +33,8 @@ enum Cmd {
     Reload,
     /// Turn auto-advance on or off: when on, a finished source moves on to the next one in the mood
     Loop { state: OnOff },
+    /// Pick audio-only stream quality for URL sources (min saves bandwidth); applies from the next source
+    Quality { level: QualityLevel },
     /// Open an interactive mood picker
     Tui,
     /// Classify a source into a mood (or use an explicit mood) and add it to the config
@@ -47,6 +49,29 @@ enum Cmd {
 enum OnOff {
     On,
     Off,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum QualityLevel {
+    Min,
+    Max,
+}
+
+impl QualityLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            QualityLevel::Min => "min",
+            QualityLevel::Max => "max",
+        }
+    }
+}
+
+pub(crate) fn quality_label(quality: &str) -> &str {
+    if quality.is_empty() {
+        "unknown"
+    } else {
+        quality
+    }
 }
 
 fn runtime_socket() -> std::path::PathBuf {
@@ -77,11 +102,12 @@ fn print_response(resp: lofi_common::Response) {
     match resp {
         lofi_common::Response::Ok => println!("ok"),
         lofi_common::Response::Error(msg) => eprintln!("error: {msg}"),
-        lofi_common::Response::Status { mood, playing, paused, current_source, loop_playback } => {
+        lofi_common::Response::Status { mood, playing, paused, current_source, loop_playback, audio_quality } => {
             let state = playback_state_label(playing, paused);
             let source = current_source.unwrap_or_else(|| "none".to_string());
             let looping = on_off_label(loop_playback);
-            println!("mood: {mood}\nstate: {state}\nsource: {source}\nloop: {looping}");
+            let quality = quality_label(&audio_quality);
+            println!("mood: {mood}\nstate: {state}\nsource: {source}\nloop: {looping}\nquality: {quality}");
         }
         lofi_common::Response::Moods(names) => {
             for name in names {
@@ -135,6 +161,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Moods => DaemonCommand::Moods,
         Cmd::Reload => DaemonCommand::Reload,
         Cmd::Loop { state } => DaemonCommand::SetLoop(matches!(state, OnOff::On)),
+        Cmd::Quality { level } => DaemonCommand::SetAudioQuality(level.as_str().to_string()),
         Cmd::Tui => unreachable!("handled above"),
         Cmd::Add { .. } => unreachable!("handled above"),
     };
@@ -168,5 +195,17 @@ mod tests {
         assert!(matches!(Cli::try_parse_from(["lofi", "loop", "off"]).unwrap().command, Cmd::Loop { state: OnOff::Off }));
         assert!(Cli::try_parse_from(["lofi", "loop", "maybe"]).is_err());
         assert!(Cli::try_parse_from(["lofi", "loop"]).is_err());
+    }
+
+    #[test]
+    fn quality_subcommand_accepts_only_min_or_max() {
+        for (arg, expected) in [("min", "min"), ("max", "max")] {
+            match Cli::try_parse_from(["lofi", "quality", arg]).unwrap().command {
+                Cmd::Quality { level } => assert_eq!(level.as_str(), expected),
+                _ => panic!("parsed as the wrong subcommand"),
+            }
+        }
+        assert!(Cli::try_parse_from(["lofi", "quality", "medium"]).is_err());
+        assert_eq!(quality_label(""), "unknown");
     }
 }

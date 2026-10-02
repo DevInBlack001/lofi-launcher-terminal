@@ -12,17 +12,19 @@ struct DaemonView {
     mood: String,
     state_label: &'static str,
     loop_playback: bool,
+    audio_quality: String,
 }
 
 // The daemon is the source of truth for playback state (e.g. a mood with no
 // sources never starts), so re-ask it rather than guessing from the command sent.
 fn refresh_status(socket: &Path, view: &mut DaemonView) {
-    if let Ok(lofi_common::Response::Status { mood, playing, paused, loop_playback, .. }) =
+    if let Ok(lofi_common::Response::Status { mood, playing, paused, loop_playback, audio_quality, .. }) =
         client::send_command(socket, &lofi_common::Command::Status)
     {
         view.mood = mood;
         view.state_label = crate::playback_state_label(playing, paused);
         view.loop_playback = loop_playback;
+        view.audio_quality = audio_quality;
     }
 }
 
@@ -64,10 +66,11 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                 .split(frame.area());
 
             let header = Paragraph::new(format!(
-                "mood: {}  ({})  loop: {}",
+                "mood: {}  ({})  loop: {}  quality: {}",
                 view.mood,
                 view.state_label,
-                crate::on_off_label(view.loop_playback)
+                crate::on_off_label(view.loop_playback),
+                crate::quality_label(&view.audio_quality)
             ))
                 .block(Block::default().borders(Borders::ALL).title("lofi").padding(Padding::horizontal(1)));
             frame.render_widget(header, chunks[0]);
@@ -86,7 +89,7 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                 Some(msg) => Paragraph::new(format!("error: {msg}"))
                     .style(Style::default().add_modifier(Modifier::BOLD))
                     .block(Block::default().borders(Borders::ALL).title("error").padding(Padding::horizontal(1))),
-                None => Paragraph::new("enter: select  p: pause  r: resume  n: next  l: loop  q: quit")
+                None => Paragraph::new("enter: select  p: pause  r: resume  n: next  l: loop  a: audio quality  q: quit")
                     .block(Block::default().borders(Borders::ALL).title("keys").padding(Padding::horizontal(1))),
             };
             frame.render_widget(footer, chunks[2]);
@@ -132,6 +135,13 @@ pub fn run(socket: PathBuf) -> anyhow::Result<()> {
                     }
                     KeyCode::Char('l') => {
                         let toggled = lofi_common::Command::SetLoop(!view.loop_playback);
+                        last_error = action_error(client::send_command(&socket, &toggled));
+                        refresh_status(&socket, &mut view);
+                    }
+                    // q is quit, so audio quality gets a.
+                    KeyCode::Char('a') => {
+                        let next = if view.audio_quality == "max" { "min" } else { "max" };
+                        let toggled = lofi_common::Command::SetAudioQuality(next.to_string());
                         last_error = action_error(client::send_command(&socket, &toggled));
                         refresh_status(&socket, &mut view);
                     }

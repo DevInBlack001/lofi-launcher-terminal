@@ -14,6 +14,7 @@ pub enum Command {
     Reload,
     Add { source: String, mood: Option<String> },
     SetLoop(bool),
+    SetAudioQuality(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +35,9 @@ pub enum Response {
         // A daemon predating this field never auto-advanced, so false is accurate.
         #[serde(default)]
         loop_playback: bool,
+        // Empty when talking to a daemon predating audio quality selection.
+        #[serde(default)]
+        audio_quality: String,
     },
     Moods(Vec<String>),
     Classified(String),
@@ -79,16 +83,18 @@ mod tests {
             paused: true,
             current_source: Some("https://example.com/playlist".to_string()),
             loop_playback: true,
+            audio_quality: "max".to_string(),
         };
         let line = encode_response(&resp);
         let decoded = decode_response(line.trim_end()).unwrap();
         match decoded {
-            Response::Status { mood, playing, paused, current_source, loop_playback } => {
+            Response::Status { mood, playing, paused, current_source, loop_playback, audio_quality } => {
                 assert_eq!(mood, "code-and-chill");
                 assert!(!playing);
                 assert!(paused);
                 assert_eq!(current_source.as_deref(), Some("https://example.com/playlist"));
                 assert!(loop_playback);
+                assert_eq!(audio_quality, "max");
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -98,10 +104,11 @@ mod tests {
     fn decodes_status_from_a_daemon_that_predates_the_paused_field() {
         let line = r#"{"kind":"Status","data":{"mood":"ambient","playing":true,"current_source":null}}"#;
         match decode_response(line).unwrap() {
-            Response::Status { playing, paused, loop_playback, .. } => {
+            Response::Status { playing, paused, loop_playback, audio_quality, .. } => {
                 assert!(playing);
                 assert!(!paused);
                 assert!(!loop_playback);
+                assert_eq!(audio_quality, "");
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -115,6 +122,15 @@ mod tests {
                 Command::SetLoop(decoded) => assert_eq!(decoded, enabled),
                 other => panic!("unexpected {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn round_trips_set_audio_quality_command() {
+        let line = encode_command(&Command::SetAudioQuality("max".to_string()));
+        match decode_command(line.trim_end()).unwrap() {
+            Command::SetAudioQuality(quality) => assert_eq!(quality, "max"),
+            other => panic!("unexpected {other:?}"),
         }
     }
 

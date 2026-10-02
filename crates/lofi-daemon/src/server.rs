@@ -64,7 +64,7 @@ fn handle_connection<M: MpvController>(stream: UnixStream, state: &Arc<Mutex<Dae
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mpv::MpvController;
+    use crate::mpv::{MpvController, StartOptions};
     use crate::state::DaemonState;
     use lofi_common::{Config, Mood};
     use std::collections::BTreeMap;
@@ -76,12 +76,9 @@ mod tests {
     struct NoopMpv;
     impl MpvController for NoopMpv {
         fn start_source(&mut self, _source: &str) -> anyhow::Result<()> { Ok(()) }
-        fn start_source_with_duration(
-            &mut self,
-            _source: &str,
-            _duration_seconds: Option<u64>,
-            _long_source_threshold_seconds: u64,
-        ) -> anyhow::Result<()> { Ok(()) }
+        fn start_source_with_options(&mut self, _source: &str, _options: &StartOptions) -> anyhow::Result<()> {
+            Ok(())
+        }
         fn stop(&mut self) -> anyhow::Result<()> { Ok(()) }
         fn pause(&mut self) -> anyhow::Result<()> { Ok(()) }
         fn resume(&mut self) -> anyhow::Result<()> { Ok(()) }
@@ -102,6 +99,7 @@ mod tests {
             classifier: BTreeMap::new(),
             long_source_minutes: 20,
             loop_playback: true,
+            audio_quality: "min".to_string(),
         };
         let state = Arc::new(Mutex::new(DaemonState::new(config, NoopMpv)));
 

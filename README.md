@@ -28,6 +28,13 @@ mpv's ytdl hook. Point a mood's `sources` at local `.mp3`/`.flac`/etc. files
 instead, and that mood plays entirely offline, no network access at all for
 those sources. Mixing local and URL sources within the same mood is fine.
 
+URL sources only ever stream audio: mpv is told to pick an audio-only
+stream, so no video data is downloaded just to be discarded. `audio_quality`
+in `config.toml` (or `lofi quality min|max`) picks the smallest audio stream
+(`min`, the default, easiest on bandwidth) or the best one (`max`). For the
+rare source with no audio-only stream (some live streams), the smallest
+combined stream is used instead.
+
 ## Install
 
 ```sh
@@ -93,6 +100,7 @@ lofi pause / lofi resume
 lofi moods              # list configured mood names
 lofi reload             # re-read config.toml after editing it by hand
 lofi loop on / lofi loop off  # auto-advance to the next source when one finishes (default on)
+lofi quality min / lofi quality max  # audio stream quality for URL sources (default min)
 lofi add <url>          # classify a URL into a mood and add it
 lofi add <url-or-path> --mood ambient  # add it to a specific mood directly
 lofi tui                # interactive mood picker

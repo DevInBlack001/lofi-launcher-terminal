@@ -7,6 +7,13 @@ long_source_minutes = 20
 # running daemon without editing this file.
 loop_playback = true
 
+# Stream quality for URL sources: "min" (smallest audio stream, saves
+# bandwidth) or "max" (best audio stream). Either way only an audio-only
+# stream is fetched when the source offers one; video is never streamed just
+# to be thrown away. Local files are unaffected. `lofi quality min|max`
+# changes this for the running daemon, starting with the next source.
+audio_quality = "min"
+
 # Each mood is a list of sources.
 # A source is a local path or a URL mpv/yt-dlp can resolve.
 # Synthwave, retrowave, and vaporwave are genre flavors: mix them into
