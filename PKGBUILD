@@ -4,7 +4,7 @@
 # general, non-Arch-specific route); the project targets Linux broadly,
 # not Arch exclusively.
 pkgname=lofi-launcher-terminal
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="Play mood-based lofi music in the background whenever a terminal or TTY session is open"
 arch=('x86_64' 'aarch64')
@@ -17,7 +17,7 @@ optdepends=(
 )
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/DevInBlack001/lofi-launcher-terminal/archive/v$pkgver.tar.gz")
-sha256sums=('1c71e03626664b76e216f6a30c5accd22daa3efd157787523ca96c9b1f0563f6')
+sha256sums=('SKIP')
 
 prepare() {
     cd "$pkgname-$pkgver"

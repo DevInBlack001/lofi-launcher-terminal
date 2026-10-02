@@ -166,16 +166,25 @@ An unquoted URL isn't truncated by `lofi`, it never reaches `lofi` at all:
 the shell splits the command at the unquoted `&` before `lofi` ever runs, so
 there's nothing the program itself can recover or detect.
 
+`lofi tui` registers its own session for as long as it's open (same as any
+other terminal), so moving around and playing sources works even if it's
+the only session open; closing the TUI unregisters it again.
+
 In `lofi tui`, Enter on a mood lists its sources (Space plays the whole mood
-right away). Enter on a local file plays it. Enter on a URL looks up its
-chapter markers (the timestamped tracklist many mix videos have) and, if it
-has any, lists them so Enter can jump straight to one; a URL without chapters
-just plays from the start. Space on a source plays it from the start without
-looking anything up, and Esc or Backspace goes back up a level. Local files
-are never looked up, so browsing an offline mood stays offline. `l` toggles
-loop and `a` toggles audio quality. `d` on a source arms removal; pressing
-it again confirms and removes that source from its mood (local files are
-not deleted from disk), moving to a different source first cancels it.
+right away). The sources list shows each entry's source on the left and its
+title on the right, with its chapter count in the middle; URL sources
+resolve this in the background (showing `...` until it arrives) while local
+files resolve instantly and never make a network call. Enter on a local
+file plays it. Enter on a URL looks up its chapter markers (the timestamped
+tracklist many mix videos have) and, if it has any, lists them so Enter can
+jump straight to one; a URL without chapters just plays from the start.
+Space on a source plays it from the start without looking anything up, and
+Esc or Backspace goes back up a level. Local files are never looked up, so
+browsing an offline mood stays offline. `l` toggles loop and `a` toggles
+audio quality. `d` on a source arms removal; pressing Enter again confirms
+and removes that source from its mood (local files are not deleted from
+disk, and the list refreshes immediately to drop it), moving to a
+different source first cancels it.
 
 With neither `--download` nor `--no-download`, `lofi add <url>` asks
 `Download this locally instead of streaming? [y/N]` (once for a whole

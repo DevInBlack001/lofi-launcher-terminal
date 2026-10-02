@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-02
+
+### Added
+
+- The TUI's sources view now shows a three-column layout: source on the
+  left, chapter count in the middle, and title on the right. URL metadata
+  (title, chapter count) is fetched in the background per row and cached
+  for the session, so browsing never blocks; local files resolve instantly
+  with no network call.
+- `lofi tui` now registers its own session for as long as it's open and
+  unregisters on exit (including a panic), so moving around and playing
+  sources from the TUI works even if it's the only session open. Previously
+  the TUI never registered, so `Mood`/`PlaySource`/chapter selection
+  silently updated state without ever starting audible playback unless
+  another terminal happened to already be registered.
+
+### Fixed
+
+- Removing a source with `d`/Enter in the TUI left the just-removed entry
+  showing in the list until the user backed out and re-entered the mood.
+  The sources list now refreshes immediately after a successful removal.
+
 ## [0.3.0] - 2026-10-02
 
 ### Added
